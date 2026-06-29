@@ -30,6 +30,17 @@ function buildSkillKeyboard() {
   };
 }
 
+function buildMainMenuKeyboard() {
+  return {
+    keyboard: [
+      [{ text: texts.startMenu.joinMentors }, { text: texts.startMenu.needMentor }],
+      [{ text: '/match' }, { text: '/busy' }],
+      [{ text: '/available' }, { text: '/help' }],
+    ],
+    resize_keyboard: true,
+  };
+}
+
 if (!token) {
   throw new Error('TELEGRAM_BOT_TOKEN is required');
 }
@@ -63,11 +74,7 @@ bot.onText(/\/start/, async (msg: Message) => {
   });
 
   await bot.sendMessage(chatId, `${texts.welcome}\n\n${texts.chooseRole}`, {
-    reply_markup: {
-      keyboard: [[{ text: texts.startMenu.joinMentors }], [{ text: texts.startMenu.needMentor }], [{ text: '/help' }]],
-      resize_keyboard: true,
-      one_time_keyboard: true,
-    },
+    reply_markup: buildMainMenuKeyboard(),
   });
 });
 
