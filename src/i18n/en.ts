@@ -2,8 +2,8 @@ export const texts = {
   welcome: 'Welcome to Mentoryab!',
   chooseRole: 'Choose an option:',
   startMenu: {
-    joinMentors: 'Join mentors',
-    needMentor: 'Need a mentor',
+    joinMentors: 'Join',
+    needMentor: 'Need',
   },
   mentorStart: 'Great! Let us create your mentor profile.\n\nWhat is your name?',
   menteeStart: 'Great! Let us create your mentee profile.\n\nWhat is your name?',
@@ -36,7 +36,7 @@ export const texts = {
     profileSummary: 'Profile summary:',
     topMentorMatches: 'Top mentor matches:',
     sendRequestInstruction: 'Send /request_{mentorId} to request this mentor.',
-    helpText: 'Use the main menu buttons to start:\nJoin mentors - become a mentor\nNeed a mentor - find a mentor\n/match - find mentors if you are a mentee\n/busy - mark yourself unavailable\n/available - mark yourself available\n/help - show this help screen',
+    helpText: 'Use the main menu buttons to start:\nJoin - become a mentor\nNeed - find a mentor\nMatch - search available mentors\nBusy - mark yourself unavailable\nAvailable - mark yourself available\n/help - show this help screen',
   },
   skillOptions: [
     'Product management',
