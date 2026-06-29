@@ -98,15 +98,6 @@ const startMenteeOnboarding = async (msg: Message) => {
 bot.onText(/^Become Mentor$/i, startMentorOnboarding);
 bot.onText(/^Find Mentor$/i, startMenteeOnboarding);
 
-bot.onText(/\/mentor/, startMentorOnboarding);
-
-bot.onText(/\/mentee/, async (msg: Message) => {
-  const chatId = msg.chat.id;
-  const telegramId = String(msg.from?.id);
-  userStates.set(telegramId, { role: 'mentee', stepIndex: 0, profile: {} });
-  await bot.sendMessage(chatId, texts.menteeStart);
-});
-
 const handleMatchRequest = async (msg: Message) => {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
@@ -148,13 +139,15 @@ const handleMatchRequest = async (msg: Message) => {
 
   const topMatches = matches.slice(0, 3);
   let reply = texts.messages.topMentorMatches + '\n';
-  const requestKeyboard = topMatches.map((mentor) => [{ text: `Request ${mentor.id}` }]);
+  const inlineKeyboard = topMatches.map((mentor) => [
+    { text: `Request ${mentor.name}`, callback_data: `request:${mentor.id}` },
+  ]);
   for (const mentor of topMatches) {
     reply += `\n${mentor.name} — skills: ${mentor.skills.join(', ')} — experience: ${mentor.experienceYears} years — location: ${mentor.location || 'N/A'}\n`;
   }
 
   await bot.sendMessage(chatId, reply, {
-    reply_markup: { keyboard: requestKeyboard, one_time_keyboard: true, resize_keyboard: true },
+    reply_markup: { inline_keyboard: inlineKeyboard },
   });
 };
 
@@ -198,144 +191,69 @@ const handleHelp = async (msg: Message) => {
   await bot.sendMessage(msg.chat.id, texts.messages.helpText);
 };
 
-bot.onText(/\/match/, handleMatchRequest);
-bot.onText(/^Search Mentors$/i, handleMatchRequest);
+// Handle inline button callbacks for requests and accept/decline
+bot.on('callback_query', async (callbackQuery) => {
+  if (!callbackQuery.data) return;
+  const data = callbackQuery.data as string;
+  const chatId = callbackQuery.message?.chat.id;
 
-bot.onText(/\/busy/, handleSetBusy);
-bot.onText(/^Set Busy$/i, handleSetBusy);
+  if (data.startsWith('request:')) {
+    const mentorId = Number(data.split(':')[1]);
+    const telegramId = String(callbackQuery.from?.id);
+    const mentee = await prisma.user.findUnique({ where: { telegramId }, include: { menteeProfile: true } });
+    if (!mentee?.menteeProfile) {
+      if (chatId) await bot.sendMessage(chatId, texts.messages.completeMenteeProfile);
+      return;
+    }
 
-bot.onText(/\/available/, handleSetAvailable);
-bot.onText(/^Set Available$/i, handleSetAvailable);
+    const mentor = await prisma.mentorProfile.findUnique({ where: { id: mentorId } });
+    if (!mentor) {
+      if (chatId) await bot.sendMessage(chatId, texts.messages.mentorNotFound);
+      return;
+    }
 
-bot.onText(/\/help/, handleHelp);
-bot.onText(/^Help$/i, handleHelp);
+    const mentorUser = await prisma.user.findUnique({ where: { id: mentor.userId } });
+    if (!mentorUser) {
+      if (chatId) await bot.sendMessage(chatId, texts.messages.mentorUserNotFound);
+      return;
+    }
 
-// Removed duplicate old request/search handler to avoid showing slash commands
+    pendingRequests.set(`${mentorUser.telegramId}:${mentee.id}`, { mentorId: mentor.id, menteeId: mentee.id });
+    if (chatId) await bot.sendMessage(chatId, format(texts.messages.requestSent, { mentorName: mentor.name }));
 
-bot.onText(/\/request_(\d+)/, async (msg: Message, match: RegExpExecArray | null) => {
-  const chatId = msg.chat.id;
-  const telegramId = String(msg.from?.id);
-  const mentorId = Number(match?.[1]);
+    // send mentor a notification with inline accept/decline buttons
+    const acceptDeclineKeyboard = {
+      inline_keyboard: [[
+        { text: 'Accept', callback_data: `accept:${mentee.id}` },
+        { text: 'Decline', callback_data: `decline:${mentee.id}` },
+      ]],
+    };
 
-  const mentee = await prisma.user.findUnique({
-    where: { telegramId },
-    include: { menteeProfile: true },
-  });
-
-  if (!mentee?.menteeProfile) {
-    await bot.sendMessage(chatId, texts.messages.completeMenteeProfile);
+    await bot.sendMessage(Number(mentorUser.telegramId), format(texts.messages.requestNew, { menteeName: mentee.menteeProfile.name, menteeId: mentee.id }), { reply_markup: acceptDeclineKeyboard });
     return;
   }
 
-  const mentor = await prisma.mentorProfile.findUnique({ where: { id: mentorId } });
-  if (!mentor) {
-    await bot.sendMessage(chatId, texts.messages.mentorNotFound);
+  if (data.startsWith('accept:') || data.startsWith('decline:')) {
+    const [action, menteeIdStr] = data.split(':');
+    const menteeId = Number(menteeIdStr);
+    const mentorTelegramId = String(callbackQuery.from?.id);
+    const requestKey = `${mentorTelegramId}:${menteeId}`;
+    const request = pendingRequests.get(requestKey);
+    if (!request) {
+      if (chatId) await bot.sendMessage(chatId, texts.messages.noPendingRequest);
+      return;
+    }
+
+    pendingRequests.delete(requestKey);
+    const menteeUser = await prisma.user.findUnique({ where: { id: menteeId } });
+    if (action === 'accept') {
+      if (chatId) await bot.sendMessage(chatId, texts.messages.requestAccepted);
+      if (menteeUser) await bot.sendMessage(Number(menteeUser.telegramId), texts.messages.acceptedNotification);
+    } else {
+      if (chatId) await bot.sendMessage(chatId, texts.messages.requestDeclined);
+      if (menteeUser) await bot.sendMessage(Number(menteeUser.telegramId), texts.messages.declinedNotification);
+    }
     return;
-  }
-
-  const mentorUser = await prisma.user.findUnique({ where: { id: mentor.userId } });
-  if (!mentorUser) {
-    await bot.sendMessage(chatId, texts.messages.mentorUserNotFound);
-    return;
-  }
-
-  pendingRequests.set(`${mentorUser.telegramId}:${mentee.id}`, { mentorId: mentor.id, menteeId: mentee.id });
-  await bot.sendMessage(chatId, format(texts.messages.requestSent, { mentorName: mentor.name }));
-  await bot.sendMessage(
-    Number(mentorUser.telegramId),
-    format(texts.messages.requestNew, {
-      menteeName: mentee.menteeProfile.name,
-      menteeId: mentee.id,
-    })
-  );
-});
-
-// Support non-slash request text from the menu buttons: "Request {id}"
-bot.onText(/^Request\s+(\d+)$/i, async (msg: Message, match: RegExpExecArray | null) => {
-  const chatId = msg.chat.id;
-  const telegramId = String(msg.from?.id);
-  const mentorId = Number(match?.[1]);
-
-  const mentee = await prisma.user.findUnique({
-    where: { telegramId },
-    include: { menteeProfile: true },
-  });
-
-  if (!mentee?.menteeProfile) {
-    await bot.sendMessage(chatId, texts.messages.completeMenteeProfile);
-    return;
-  }
-
-  const mentor = await prisma.mentorProfile.findUnique({ where: { id: mentorId } });
-  if (!mentor) {
-    await bot.sendMessage(chatId, texts.messages.mentorNotFound);
-    return;
-  }
-
-  const mentorUser = await prisma.user.findUnique({ where: { id: mentor.userId } });
-  if (!mentorUser) {
-    await bot.sendMessage(chatId, texts.messages.mentorUserNotFound);
-    return;
-  }
-
-  pendingRequests.set(`${mentorUser.telegramId}:${mentee.id}`, { mentorId: mentor.id, menteeId: mentee.id });
-  await bot.sendMessage(chatId, format(texts.messages.requestSent, { mentorName: mentor.name }));
-  await bot.sendMessage(
-    Number(mentorUser.telegramId),
-    format(texts.messages.requestNew, {
-      menteeName: mentee.menteeProfile.name,
-      menteeId: mentee.id,
-    })
-  );
-});
-
-bot.onText(/\/accept_(\d+)/, async (msg: Message, match: RegExpExecArray | null) => {
-  const chatId = msg.chat.id;
-  const telegramId = String(msg.from?.id);
-  const menteeId = Number(match?.[1]);
-
-  const mentorUser = await prisma.user.findUnique({ where: { telegramId } });
-  if (!mentorUser) {
-    return;
-  }
-
-  const requestKey = `${telegramId}:${menteeId}`;
-  const request = pendingRequests.get(requestKey);
-  if (!request) {
-    await bot.sendMessage(chatId, texts.messages.noPendingRequest);
-    return;
-  }
-
-  pendingRequests.delete(requestKey);
-  const menteeUser = await prisma.user.findUnique({ where: { id: menteeId } });
-  await bot.sendMessage(chatId, texts.messages.requestAccepted);
-  if (menteeUser) {
-    await bot.sendMessage(Number(menteeUser.telegramId), texts.messages.acceptedNotification);
-  }
-});
-
-bot.onText(/\/decline_(\d+)/, async (msg: Message, match: RegExpExecArray | null) => {
-  const chatId = msg.chat.id;
-  const telegramId = String(msg.from?.id);
-  const menteeId = Number(match?.[1]);
-
-  const mentorUser = await prisma.user.findUnique({ where: { telegramId } });
-  if (!mentorUser) {
-    return;
-  }
-
-  const requestKey = `${telegramId}:${menteeId}`;
-  const request = pendingRequests.get(requestKey);
-  if (!request) {
-    await bot.sendMessage(chatId, texts.messages.noPendingRequest);
-    return;
-  }
-
-  pendingRequests.delete(requestKey);
-  const menteeUser = await prisma.user.findUnique({ where: { id: menteeId } });
-  await bot.sendMessage(chatId, texts.messages.requestDeclined);
-  if (menteeUser) {
-    await bot.sendMessage(Number(menteeUser.telegramId), texts.messages.declinedNotification);
   }
 });
 
