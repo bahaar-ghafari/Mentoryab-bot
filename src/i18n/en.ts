@@ -36,7 +36,7 @@ export const texts = {
     profileSummary: 'Profile summary:',
     topMentorMatches: 'Top mentor matches:',
     sendRequestInstruction: 'Send /request_{mentorId} to request this mentor.',
-    helpText: 'Commands:\n/start - restart the bot\n/mentor - create a mentor profile\n/mentee - create a mentee profile\n/match - find mentors\n/busy - mark yourself unavailable\n/available - mark yourself available\n/help - show this help screen',
+    helpText: 'Use the main menu buttons to start:\nJoin mentors - become a mentor\nNeed a mentor - find a mentor\n/match - find mentors if you are a mentee\n/busy - mark yourself unavailable\n/available - mark yourself available\n/help - show this help screen',
   },
   skillOptions: [
     'Product management',
