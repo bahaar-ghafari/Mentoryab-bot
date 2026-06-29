@@ -11,7 +11,7 @@ const ONBOARDING_STEPS = {
 } as const;
 
 type OnboardingStep = typeof ONBOARDING_STEPS['mentor'][number] | typeof ONBOARDING_STEPS['mentee'][number];
-type SubStep = 'year' | 'month' | 'customCountry' | 'customSkill' | 'customTitle';
+type SubStep = 'year' | 'month';
 
 interface UserState {
   role: 'mentor' | 'mentee';
@@ -54,6 +54,7 @@ async function getSkillOptions(): Promise<string[]> {
 function buildSkillsInlineKeyboard(options: string[], selected: string[], canGoBack: boolean) {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
 
+  // Predefined options
   for (let i = 0; i < options.length; i += 2) {
     rows.push(
       options.slice(i, i + 2).map((skill) => ({
@@ -63,7 +64,16 @@ function buildSkillsInlineKeyboard(options: string[], selected: string[], canGoB
     );
   }
 
-  rows.push([{ text: '✏️ Type custom', callback_data: 'custom_skill' }]);
+  // Custom typed skills not in predefined list — always shown as selected ✅
+  const custom = selected.filter((s) => !options.some((o) => o.toLowerCase() === s.toLowerCase()));
+  for (let i = 0; i < custom.length; i += 2) {
+    rows.push(
+      custom.slice(i, i + 2).map((skill) => ({
+        text: `✅ ${skill}`,
+        callback_data: `toggle_skill:${skill}`,
+      }))
+    );
+  }
 
   const actionRow: Array<{ text: string; callback_data: string }> = [];
   if (canGoBack) actionRow.push({ text: '← Back', callback_data: 'back' });
@@ -84,10 +94,7 @@ function buildTitleInlineKeyboard(canGoBack: boolean) {
       options.slice(i, i + 2).map((t) => ({ text: t, callback_data: `title:${t}` }))
     );
   }
-  const lastRow: Array<{ text: string; callback_data: string }> = [];
-  if (canGoBack) lastRow.push({ text: '← Back', callback_data: 'back' });
-  lastRow.push({ text: '✏️ Type custom', callback_data: 'title_other' });
-  rows.push(lastRow);
+  if (canGoBack) rows.push([{ text: '← Back', callback_data: 'back' }]);
   return { inline_keyboard: rows };
 }
 
@@ -125,10 +132,7 @@ function buildCountryInlineKeyboard(canGoBack: boolean) {
       options.slice(i, i + 2).map((c) => ({ text: c, callback_data: `country:${c}` }))
     );
   }
-  const lastRow: Array<{ text: string; callback_data: string }> = [];
-  if (canGoBack) lastRow.push({ text: '← Back', callback_data: 'back' });
-  lastRow.push({ text: '✏️ Type custom', callback_data: 'country_other' });
-  rows.push(lastRow);
+  if (canGoBack) rows.push([{ text: '← Back', callback_data: 'back' }]);
   return { inline_keyboard: rows };
 }
 
@@ -477,32 +481,6 @@ bot.on('callback_query', async (callbackQuery) => {
     return;
   }
 
-  // ── Type custom skill ──
-  if (data === 'custom_skill') {
-    if (!state || !chatId) return;
-    state.awaitingSubStep = 'customSkill';
-    await bot.editMessageText('Type your skill(s), comma separated:', {
-      chat_id: chatId,
-      message_id: state.currentMessageId,
-      reply_markup: { inline_keyboard: [[{ text: '← Back to skills', callback_data: 'back_to_skills' }]] },
-    });
-    return;
-  }
-
-  // ── Back to skills from custom input ──
-  if (data === 'back_to_skills') {
-    if (!state || !chatId) return;
-    state.awaitingSubStep = undefined;
-    const prompt = state.role === 'mentor' ? texts.prompts.skillsMentor : texts.prompts.skillsMentee;
-    const skillOptions = await getSkillOptions();
-    await bot.editMessageText(prompt, {
-      chat_id: chatId,
-      message_id: state.currentMessageId,
-      reply_markup: buildSkillsInlineKeyboard(skillOptions, state.selectedSkills, state.stepIndex > 0),
-    });
-    return;
-  }
-
   // ── Skill done ──
   if (data === 'skill_done') {
     if (!state || !chatId) return;
@@ -585,30 +563,6 @@ bot.on('callback_query', async (callbackQuery) => {
     return;
   }
 
-  // ── Type custom title ──
-  if (data === 'title_other') {
-    if (!state || !chatId) return;
-    state.awaitingSubStep = 'customTitle';
-    await bot.editMessageText(texts.prompts.titleCustom, {
-      chat_id: chatId,
-      message_id: state.currentMessageId,
-      reply_markup: { inline_keyboard: [[{ text: '← Back to list', callback_data: 'back_to_titles' }]] },
-    });
-    return;
-  }
-
-  // ── Back to titles from custom input ──
-  if (data === 'back_to_titles') {
-    if (!state || !chatId) return;
-    state.awaitingSubStep = undefined;
-    await bot.editMessageText(texts.prompts.title, {
-      chat_id: chatId,
-      message_id: state.currentMessageId,
-      reply_markup: buildTitleInlineKeyboard(state.stepIndex > 0),
-    });
-    return;
-  }
-
   // ── Country selected ──
   if (data.startsWith('country:')) {
     if (!state || !chatId) return;
@@ -617,30 +571,6 @@ bot.on('callback_query', async (callbackQuery) => {
     const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
     if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
     await showStep(chatId, nextStep, state.role, telegramId);
-    return;
-  }
-
-  // ── Type custom country ──
-  if (data === 'country_other') {
-    if (!state || !chatId) return;
-    state.awaitingSubStep = 'customCountry';
-    await bot.editMessageText(texts.prompts.countryCustom, {
-      chat_id: chatId,
-      message_id: state.currentMessageId,
-      reply_markup: { inline_keyboard: [[{ text: '← Back to list', callback_data: 'back_to_countries' }]] },
-    });
-    return;
-  }
-
-  // ── Back to countries from custom input ──
-  if (data === 'back_to_countries') {
-    if (!state || !chatId) return;
-    state.awaitingSubStep = undefined;
-    await bot.editMessageText(texts.prompts.country, {
-      chat_id: chatId,
-      message_id: state.currentMessageId,
-      reply_markup: buildCountryInlineKeyboard(state.stepIndex > 0),
-    });
     return;
   }
 
@@ -711,49 +641,24 @@ bot.on('message', async (msg: Message) => {
     return;
   }
 
-  // Custom skill text input
-  if (state.awaitingSubStep === 'customSkill') {
+  // Normal text step
+  const currentStep = ONBOARDING_STEPS[state.role][state.stepIndex] as OnboardingStep;
+
+  // Skills step: typing adds to selection; only Done advances
+  if (currentStep === 'skills') {
     const typed = text.split(',').map((s) => s.trim()).filter(Boolean);
     for (const s of typed) {
       if (!state.selectedSkills.includes(s)) state.selectedSkills.push(s);
     }
-    state.awaitingSubStep = undefined;
-    const prompt = state.role === 'mentor' ? texts.prompts.skillsMentor : texts.prompts.skillsMentee;
     const skillOpts = await getSkillOptions();
-    await bot.editMessageText(prompt, {
-      chat_id: chatId,
-      message_id: state.currentMessageId,
-      reply_markup: buildSkillsInlineKeyboard(skillOpts, state.selectedSkills, state.stepIndex > 0),
-    });
+    const markup = buildSkillsInlineKeyboard(skillOpts, state.selectedSkills, state.stepIndex > 0);
+    try {
+      await bot.editMessageReplyMarkup(markup, { chat_id: chatId, message_id: state.currentMessageId });
+    } catch (err) {
+      console.error('skill keyboard update failed:', err);
+    }
     return;
   }
-
-  // Custom title text input
-  if (state.awaitingSubStep === 'customTitle') {
-    if (!text.trim()) { await bot.sendMessage(chatId, texts.prompts.titleCustom); return; }
-    state.profile.title = text.trim();
-    state.awaitingSubStep = undefined;
-    state.stepIndex += 1;
-    const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
-    if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
-    await showStep(chatId, nextStep, state.role, telegramId);
-    return;
-  }
-
-  // Custom country text input
-  if (state.awaitingSubStep === 'customCountry') {
-    if (!text.trim()) { await bot.sendMessage(chatId, texts.prompts.countryCustom); return; }
-    state.profile.country = text.trim();
-    state.awaitingSubStep = undefined;
-    state.stepIndex += 1;
-    const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
-    if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
-    await showStep(chatId, nextStep, state.role, telegramId);
-    return;
-  }
-
-  // Normal text step
-  const currentStep = ONBOARDING_STEPS[state.role][state.stepIndex] as OnboardingStep;
   state.profile[currentStep] = text;
   state.stepIndex += 1;
 
