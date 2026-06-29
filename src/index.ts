@@ -30,13 +30,15 @@ function buildSkillKeyboard() {
   };
 }
 
-function buildMainMenuKeyboard() {
+function buildMainMenuKeyboard(isMentor = false) {
+  const keyboard: Array<Array<{ text: string }>> = [];
+  keyboard.push([{ text: texts.startMenu.joinMentors }, { text: texts.startMenu.needMentor }]);
+  if (isMentor) {
+    keyboard.push([{ text: texts.startMenu.busy }, { text: texts.startMenu.available }]);
+  }
+  keyboard.push([{ text: texts.startMenu.help }]);
   return {
-    keyboard: [
-      [{ text: texts.startMenu.joinMentors }, { text: texts.startMenu.needMentor }],
-      [{ text: texts.startMenu.match }, { text: texts.startMenu.busy }],
-      [{ text: texts.startMenu.available }, { text: texts.startMenu.help }],
-    ],
+    keyboard,
     resize_keyboard: true,
   };
 }
@@ -73,8 +75,9 @@ bot.onText(/\/start/, async (msg: Message) => {
     },
   });
 
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
   await bot.sendMessage(chatId, `${texts.welcome}\n\n${texts.chooseRole}`, {
-    reply_markup: buildMainMenuKeyboard(),
+    reply_markup: buildMainMenuKeyboard(Boolean(user?.mentorProfile)),
   });
 });
 
@@ -358,6 +361,8 @@ bot.on('message', async (msg: Message) => {
       .map(([key, value]) => `${key}: ${value}`)
       .join('\n');
 
+    const isMentorNow = state.role === 'mentor';
+
     await prisma.user.update({
       where: { telegramId },
       data: {
@@ -390,6 +395,9 @@ bot.on('message', async (msg: Message) => {
 
     userStates.delete(telegramId);
     await bot.sendMessage(msg.chat.id, `Thanks! Your ${roleText} profile is ready.\n\n${profileText}`);
+    await bot.sendMessage(msg.chat.id, texts.chooseRole, {
+      reply_markup: buildMainMenuKeyboard(isMentorNow),
+    });
     return;
   }
 

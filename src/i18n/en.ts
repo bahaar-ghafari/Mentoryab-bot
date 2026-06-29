@@ -4,7 +4,6 @@ export const texts = {
   startMenu: {
     joinMentors: 'Become Mentor',
     needMentor: 'Find Mentor',
-    match: 'Search Mentors',
     busy: 'Set Busy',
     available: 'Set Available',
     help: 'Help',
@@ -40,7 +39,7 @@ export const texts = {
     profileSummary: 'Profile summary:',
     topMentorMatches: 'Top mentor matches:',
     sendRequestInstruction: 'Tap the Request button next to a mentor to send a request.',
-    helpText: 'Use the main menu buttons to start:\nBecome Mentor - create a mentor profile\nFind Mentor - start mentee onboarding to find mentors\nSearch Mentors - search available mentors\nSet Busy - (mentors only) mark yourself unavailable\nSet Available - (mentors only) mark yourself available\nHelp - show this help screen',
+    helpText: 'Use the main menu buttons to start:\nBecome Mentor - create a mentor profile\nFind Mentor - start mentee onboarding to find mentors\nSet Busy - (mentors only) mark yourself unavailable\nSet Available - (mentors only) mark yourself available\nHelp - show this help screen',
   },
   skillOptions: [
     'Product management',
