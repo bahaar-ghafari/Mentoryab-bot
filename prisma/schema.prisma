@@ -1,0 +1,54 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               Int      @id @default(autoincrement())
+  telegramId       String   @unique
+  firstName        String?
+  lastName         String?
+  username         String?
+  role             Role     @default(MENTEE)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  mentorProfile    MentorProfile?
+  menteeProfile    MenteeProfile?
+}
+
+enum Role {
+  MENTOR
+  MENTEE
+  ADMIN
+}
+
+model MentorProfile {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @unique
+  user            User     @relation(fields: [userId], references: [id])
+  name            String
+  skills          String[]
+  experienceYears Int
+  location        String?
+  availability    Boolean  @default(true)
+  contactMethod   String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model MenteeProfile {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @unique
+  user            User     @relation(fields: [userId], references: [id])
+  name            String
+  goals           String?
+  skillsNeeded    String[]
+  experienceYears Int?
+  location        String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
