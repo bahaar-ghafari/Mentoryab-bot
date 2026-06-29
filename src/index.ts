@@ -92,8 +92,8 @@ const startMenteeOnboarding = async (msg: Message) => {
   await bot.sendMessage(chatId, texts.menteeStart);
 };
 
-bot.onText(/^Join$/i, startMentorOnboarding);
-bot.onText(/^Need$/i, startMenteeOnboarding);
+bot.onText(/^Become Mentor$/i, startMentorOnboarding);
+bot.onText(/^Find Mentor$/i, startMenteeOnboarding);
 
 bot.onText(/\/mentor/, startMentorOnboarding);
 
@@ -145,11 +145,14 @@ const handleMatchRequest = async (msg: Message) => {
 
   const topMatches = matches.slice(0, 3);
   let reply = texts.messages.topMentorMatches + '\n';
+  const requestKeyboard = topMatches.map((mentor) => [{ text: `Request ${mentor.id}` }]);
   for (const mentor of topMatches) {
     reply += `\n${mentor.name} — skills: ${mentor.skills.join(', ')} — experience: ${mentor.experienceYears} years — location: ${mentor.location || 'N/A'}\n`;
   }
 
-  await bot.sendMessage(chatId, reply);
+  await bot.sendMessage(chatId, reply, {
+    reply_markup: { keyboard: requestKeyboard, one_time_keyboard: true, resize_keyboard: true },
+  });
 };
 
 const handleSetBusy = async (msg: Message) => {
@@ -193,66 +196,59 @@ const handleHelp = async (msg: Message) => {
 };
 
 bot.onText(/\/match/, handleMatchRequest);
-bot.onText(/^Match$/i, handleMatchRequest);
+bot.onText(/^Search Mentors$/i, handleMatchRequest);
 
 bot.onText(/\/busy/, handleSetBusy);
-bot.onText(/^Busy$/i, handleSetBusy);
+bot.onText(/^Set Busy$/i, handleSetBusy);
 
 bot.onText(/\/available/, handleSetAvailable);
-bot.onText(/^Available$/i, handleSetAvailable);
+bot.onText(/^Set Available$/i, handleSetAvailable);
 
 bot.onText(/\/help/, handleHelp);
 bot.onText(/^Help$/i, handleHelp);
 
+// Removed duplicate old request/search handler to avoid showing slash commands
+
 bot.onText(/\/request_(\d+)/, async (msg: Message, match: RegExpExecArray | null) => {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
-  const user = await prisma.user.findUnique({
+  const mentorId = Number(match?.[1]);
+
+  const mentee = await prisma.user.findUnique({
     where: { telegramId },
     include: { menteeProfile: true },
   });
 
-  if (!user?.menteeProfile) {
+  if (!mentee?.menteeProfile) {
     await bot.sendMessage(chatId, texts.messages.completeMenteeProfile);
     return;
   }
 
-  const mentors = await prisma.mentorProfile.findMany({
-    where: { availability: true },
-  });
-
-  const matches = findMentorMatches(
-    {
-      name: user.menteeProfile.name,
-      skillsNeeded: user.menteeProfile.skillsNeeded,
-      experienceYears: user.menteeProfile.experienceYears,
-      location: user.menteeProfile.location,
-    },
-    mentors.map((mentor) => ({
-      id: mentor.id,
-      name: mentor.name,
-      skills: mentor.skills,
-      experienceYears: mentor.experienceYears,
-      location: mentor.location,
-      availability: mentor.availability,
-    }))
-  );
-
-  if (!matches.length) {
-    await bot.sendMessage(chatId, texts.messages.noMentorsAvailable);
+  const mentor = await prisma.mentorProfile.findUnique({ where: { id: mentorId } });
+  if (!mentor) {
+    await bot.sendMessage(chatId, texts.messages.mentorNotFound);
     return;
   }
 
-  const topMatches = matches.slice(0, 3);
-  let reply = 'Top mentor matches:\n';
-  for (const mentor of topMatches) {
-    reply += `\n${mentor.name} — skills: ${mentor.skills.join(', ')} — experience: ${mentor.experienceYears} years — location: ${mentor.location || 'N/A'}\nSend /request_${mentor.id} to request this mentor.`;
+  const mentorUser = await prisma.user.findUnique({ where: { id: mentor.userId } });
+  if (!mentorUser) {
+    await bot.sendMessage(chatId, texts.messages.mentorUserNotFound);
+    return;
   }
 
-  await bot.sendMessage(chatId, reply);
+  pendingRequests.set(`${mentorUser.telegramId}:${mentee.id}`, { mentorId: mentor.id, menteeId: mentee.id });
+  await bot.sendMessage(chatId, format(texts.messages.requestSent, { mentorName: mentor.name }));
+  await bot.sendMessage(
+    Number(mentorUser.telegramId),
+    format(texts.messages.requestNew, {
+      menteeName: mentee.menteeProfile.name,
+      menteeId: mentee.id,
+    })
+  );
 });
 
-bot.onText(/\/request_(\d+)/, async (msg: Message, match: RegExpExecArray | null) => {
+// Support non-slash request text from the menu buttons: "Request {id}"
+bot.onText(/^Request\s+(\d+)$/i, async (msg: Message, match: RegExpExecArray | null) => {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
   const mentorId = Number(match?.[1]);
