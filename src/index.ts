@@ -62,15 +62,33 @@ bot.onText(/\/start/, async (msg: Message) => {
     },
   });
 
-  await bot.sendMessage(chatId, `${texts.welcome}\n\n${texts.chooseRole}`);
+  await bot.sendMessage(chatId, `${texts.welcome}\n\n${texts.chooseRole}`, {
+    reply_markup: {
+      keyboard: [[{ text: texts.startMenu.joinMentors }], [{ text: texts.startMenu.needMentor }], [{ text: '/help' }]],
+      resize_keyboard: true,
+      one_time_keyboard: true,
+    },
+  });
 });
 
-bot.onText(/\/mentor/, async (msg: Message) => {
+const startMentorOnboarding = async (msg: Message) => {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
   userStates.set(telegramId, { role: 'mentor', stepIndex: 0, profile: {} });
   await bot.sendMessage(chatId, texts.mentorStart);
-});
+};
+
+const startMenteeOnboarding = async (msg: Message) => {
+  const chatId = msg.chat.id;
+  const telegramId = String(msg.from?.id);
+  userStates.set(telegramId, { role: 'mentee', stepIndex: 0, profile: {} });
+  await bot.sendMessage(chatId, texts.menteeStart);
+};
+
+bot.onText(/^Join mentors$/i, startMentorOnboarding);
+bot.onText(/^Need a mentor$/i, startMenteeOnboarding);
+
+bot.onText(/\/mentor/, startMentorOnboarding);
 
 bot.onText(/\/mentee/, async (msg: Message) => {
   const chatId = msg.chat.id;
@@ -239,7 +257,7 @@ bot.onText(/\/available/, async (msg: Message) => {
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
 
   if (!user?.mentorProfile) {
-    await bot.sendMessage(chatId, 'You need to create a mentor profile first.');
+    await bot.sendMessage(chatId, texts.messages.needMentorProfile);
     return;
   }
 
@@ -249,6 +267,10 @@ bot.onText(/\/available/, async (msg: Message) => {
   });
 
   await bot.sendMessage(chatId, texts.messages.availableSet);
+});
+
+bot.onText(/\/help/, async (msg: Message) => {
+  await bot.sendMessage(msg.chat.id, texts.messages.helpText);
 });
 
 bot.on('message', async (msg: Message) => {
