@@ -57,7 +57,7 @@ function buildSkillsInlineKeyboard(options: string[], selected: string[], canGoB
   for (let i = 0; i < options.length; i += 2) {
     rows.push(
       options.slice(i, i + 2).map((skill) => ({
-        text: selected.includes(skill) ? `✓ ${skill}` : skill,
+        text: selected.includes(skill) ? `✅ ${skill}` : skill,
         callback_data: `toggle_skill:${skill}`,
       }))
     );
@@ -68,7 +68,7 @@ function buildSkillsInlineKeyboard(options: string[], selected: string[], canGoB
   const actionRow: Array<{ text: string; callback_data: string }> = [];
   if (canGoBack) actionRow.push({ text: '← Back', callback_data: 'back' });
   actionRow.push({
-    text: selected.length > 0 ? `Done ✓ (${selected.length})` : 'Done',
+    text: selected.length > 0 ? `Done ✅ (${selected.length})` : 'Done',
     callback_data: 'skill_done',
   });
   rows.push(actionRow);
