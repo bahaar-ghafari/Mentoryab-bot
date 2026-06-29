@@ -39,6 +39,7 @@ model MentorProfile {
   userId          Int      @unique
   user            User     @relation(fields: [userId], references: [id])
   name            String
+  title           String?
   skills          String[]
   experienceYears Int
   location        String?

@@ -6,12 +6,12 @@ import { findMentorMatches } from './matching.js';
 import { texts } from './i18n/en.js';
 
 const ONBOARDING_STEPS = {
-  mentor: ['name', 'skills', 'experience', 'country', 'city', 'contact'],
+  mentor: ['name', 'title', 'skills', 'experience', 'country', 'city', 'contact'],
   mentee: ['name', 'goals', 'skills', 'experience', 'country', 'city'],
 } as const;
 
 type OnboardingStep = typeof ONBOARDING_STEPS['mentor'][number] | typeof ONBOARDING_STEPS['mentee'][number];
-type SubStep = 'year' | 'month' | 'customCountry' | 'customSkill';
+type SubStep = 'year' | 'month' | 'customCountry' | 'customSkill' | 'customTitle';
 
 interface UserState {
   role: 'mentor' | 'mentee';
@@ -61,6 +61,21 @@ function buildSkillsInlineKeyboard(selected: string[], canGoBack: boolean) {
   });
   rows.push(actionRow);
 
+  return { inline_keyboard: rows };
+}
+
+function buildTitleInlineKeyboard(canGoBack: boolean) {
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  const options = texts.titleOptions;
+  for (let i = 0; i < options.length; i += 2) {
+    rows.push(
+      options.slice(i, i + 2).map((t) => ({ text: t, callback_data: `title:${t}` }))
+    );
+  }
+  const lastRow: Array<{ text: string; callback_data: string }> = [];
+  if (canGoBack) lastRow.push({ text: '← Back', callback_data: 'back' });
+  lastRow.push({ text: '✏️ Type custom', callback_data: 'title_other' });
+  rows.push(lastRow);
   return { inline_keyboard: rows };
 }
 
@@ -139,6 +154,11 @@ async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee',
   let reply_markup: object;
 
   switch (step) {
+    case 'title':
+      text = texts.prompts.title;
+      reply_markup = buildTitleInlineKeyboard(canGoBack);
+      break;
+
     case 'skills':
       text = role === 'mentor' ? texts.prompts.skillsMentor : texts.prompts.skillsMentee;
       reply_markup = buildSkillsInlineKeyboard(state.selectedSkills, canGoBack);
@@ -200,6 +220,7 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
             mentorProfile: {
               create: {
                 name: state.profile.name || 'Mentor',
+                title: state.profile.title || null,
                 skills: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
                 experienceYears,
                 location,
@@ -225,6 +246,7 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
 
   const summary = [
     `Name: ${state.profile.name}`,
+    state.profile.title ? `Title: ${state.profile.title}` : null,
     `Skills: ${state.profile.skills}`,
     state.profile.experience ? `Career start: ${state.profile.experience}` : null,
     location ? `Location: ${location}` : null,
@@ -273,6 +295,7 @@ bot.onText(/\/mentors/, async (msg: Message) => {
 
   const lines = mentors.map((m, i) => [
     `${i + 1}. ${m.name} [${m.availability ? 'Available' : 'Busy'}]`,
+    m.title ? `   Title: ${m.title}` : null,
     `   Skills: ${m.skills.join(', ')}`,
     `   Exp: ${m.experienceYears} yr${m.experienceYears !== 1 ? 's' : ''}`,
     m.location ? `   Location: ${m.location}` : null,
@@ -378,6 +401,7 @@ const handleAdminMentorsList = async (msg: Message) => {
   if (!mentors.length) { await bot.sendMessage(msg.chat.id, 'No mentors registered yet.'); return; }
   const lines = mentors.map((m, i) => [
     `${i + 1}. ${m.name} [${m.availability ? 'Available' : 'Busy'}]`,
+    m.title ? `   Title: ${m.title}` : null,
     `   Skills: ${m.skills.join(', ')}`,
     `   Exp: ${m.experienceYears} yr${m.experienceYears !== 1 ? 's' : ''}`,
     m.location ? `   Location: ${m.location}` : null,
@@ -529,6 +553,41 @@ bot.on('callback_query', async (callbackQuery) => {
     return;
   }
 
+  // ── Title selected ──
+  if (data.startsWith('title:') && !data.startsWith('title_')) {
+    if (!state || !chatId) return;
+    state.profile.title = data.slice('title:'.length);
+    state.stepIndex += 1;
+    const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
+    if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
+    await showStep(chatId, nextStep, state.role, telegramId);
+    return;
+  }
+
+  // ── Type custom title ──
+  if (data === 'title_other') {
+    if (!state || !chatId) return;
+    state.awaitingSubStep = 'customTitle';
+    await bot.editMessageText(texts.prompts.titleCustom, {
+      chat_id: chatId,
+      message_id: state.currentMessageId,
+      reply_markup: { inline_keyboard: [[{ text: '← Back to list', callback_data: 'back_to_titles' }]] },
+    });
+    return;
+  }
+
+  // ── Back to titles from custom input ──
+  if (data === 'back_to_titles') {
+    if (!state || !chatId) return;
+    state.awaitingSubStep = undefined;
+    await bot.editMessageText(texts.prompts.title, {
+      chat_id: chatId,
+      message_id: state.currentMessageId,
+      reply_markup: buildTitleInlineKeyboard(state.stepIndex > 0),
+    });
+    return;
+  }
+
   // ── Country selected ──
   if (data.startsWith('country:')) {
     if (!state || !chatId) return;
@@ -644,6 +703,18 @@ bot.on('message', async (msg: Message) => {
       message_id: state.currentMessageId,
       reply_markup: buildSkillsInlineKeyboard(state.selectedSkills, state.stepIndex > 0),
     });
+    return;
+  }
+
+  // Custom title text input
+  if (state.awaitingSubStep === 'customTitle') {
+    if (!text.trim()) { await bot.sendMessage(chatId, texts.prompts.titleCustom); return; }
+    state.profile.title = text.trim();
+    state.awaitingSubStep = undefined;
+    state.stepIndex += 1;
+    const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
+    if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
+    await showStep(chatId, nextStep, state.role, telegramId);
     return;
   }
 
