@@ -38,8 +38,20 @@ function format(text: string, values: Record<string, string | number> = {}) {
 
 // ── Inline keyboard builders ──────────────────────────────────────────────────
 
-function buildSkillsInlineKeyboard(selected: string[], canGoBack: boolean) {
-  const options = texts.skillOptions.filter((s) => s !== 'Other');
+async function getSkillOptions(): Promise<string[]> {
+  const mentors = await prisma.mentorProfile.findMany({ select: { skills: true } });
+  const mentorSkills = [...new Set(mentors.flatMap((m) => m.skills))];
+  const base = texts.skillOptions.filter((s) => s !== 'Other');
+  const combined = [...base];
+  for (const s of mentorSkills) {
+    if (!combined.some((o) => o.toLowerCase() === s.toLowerCase())) {
+      combined.push(s);
+    }
+  }
+  return combined;
+}
+
+function buildSkillsInlineKeyboard(options: string[], selected: string[], canGoBack: boolean) {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
 
   for (let i = 0; i < options.length; i += 2) {
@@ -159,10 +171,12 @@ async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee',
       reply_markup = buildTitleInlineKeyboard(canGoBack);
       break;
 
-    case 'skills':
+    case 'skills': {
+      const skillOptions = await getSkillOptions();
       text = role === 'mentor' ? texts.prompts.skillsMentor : texts.prompts.skillsMentee;
-      reply_markup = buildSkillsInlineKeyboard(state.selectedSkills, canGoBack);
+      reply_markup = buildSkillsInlineKeyboard(skillOptions, state.selectedSkills, canGoBack);
       break;
+    }
 
     case 'experience':
       state.awaitingSubStep = 'year';
@@ -450,8 +464,9 @@ bot.on('callback_query', async (callbackQuery) => {
     const idx = state.selectedSkills.indexOf(skill);
     if (idx === -1) state.selectedSkills.push(skill);
     else state.selectedSkills.splice(idx, 1);
+    const skillOptions = await getSkillOptions();
     await bot.editMessageReplyMarkup(
-      buildSkillsInlineKeyboard(state.selectedSkills, state.stepIndex > 0),
+      buildSkillsInlineKeyboard(skillOptions, state.selectedSkills, state.stepIndex > 0),
       { chat_id: chatId, message_id: state.currentMessageId }
     );
     return;
@@ -474,10 +489,11 @@ bot.on('callback_query', async (callbackQuery) => {
     if (!state || !chatId) return;
     state.awaitingSubStep = undefined;
     const prompt = state.role === 'mentor' ? texts.prompts.skillsMentor : texts.prompts.skillsMentee;
+    const skillOptions = await getSkillOptions();
     await bot.editMessageText(prompt, {
       chat_id: chatId,
       message_id: state.currentMessageId,
-      reply_markup: buildSkillsInlineKeyboard(state.selectedSkills, state.stepIndex > 0),
+      reply_markup: buildSkillsInlineKeyboard(skillOptions, state.selectedSkills, state.stepIndex > 0),
     });
     return;
   }
@@ -698,10 +714,11 @@ bot.on('message', async (msg: Message) => {
     }
     state.awaitingSubStep = undefined;
     const prompt = state.role === 'mentor' ? texts.prompts.skillsMentor : texts.prompts.skillsMentee;
+    const skillOpts = await getSkillOptions();
     await bot.editMessageText(prompt, {
       chat_id: chatId,
       message_id: state.currentMessageId,
-      reply_markup: buildSkillsInlineKeyboard(state.selectedSkills, state.stepIndex > 0),
+      reply_markup: buildSkillsInlineKeyboard(skillOpts, state.selectedSkills, state.stepIndex > 0),
     });
     return;
   }
