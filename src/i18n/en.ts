@@ -24,7 +24,10 @@ export const texts = {
     experienceMonth: 'Great! Now select a month:',
     country: 'Would you like to add your country? Choose from the list or type it below. You can also skip.',
     city: 'Would you like to add your city? Type it below, or skip.',
-    contact: 'How should mentees contact you? (email, phone, or Telegram)',
+    contact: 'How should mentees contact you?\n\nSelect a contact method below (at least one required):',
+    contactTelegram: 'Enter your Telegram username (e.g. @username):',
+    contactPhone: 'Enter your phone number (e.g. +1234567890):',
+    contactEmail: 'Enter your email address:',
     goals: 'What are your learning goals?',
   },
   messages: {

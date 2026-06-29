@@ -12,6 +12,13 @@ const ONBOARDING_STEPS = {
 
 type OnboardingStep = typeof ONBOARDING_STEPS['mentor'][number] | typeof ONBOARDING_STEPS['mentee'][number];
 type SubStep = 'year' | 'month';
+type ContactType = 'telegram' | 'phone' | 'email';
+
+const CONTACT_LABELS: Record<ContactType, string> = {
+  telegram: 'Telegram ID',
+  phone: 'Phone Number',
+  email: 'Email',
+};
 
 interface UserState {
   role: 'mentor' | 'mentee';
@@ -20,6 +27,8 @@ interface UserState {
   awaitingSubStep?: SubStep;
   currentMessageId?: number;
   selectedSkills: string[];
+  contactMethods?: Partial<Record<ContactType, string>>;
+  awaitingContactType?: ContactType;
 }
 
 dotenv.config();
@@ -124,6 +133,23 @@ function buildMonthKeyboard(year: string) {
   return { inline_keyboard: rows };
 }
 
+function buildContactTypeKeyboard(collected: Partial<Record<ContactType, string>>, canGoBack: boolean) {
+  const all: ContactType[] = ['telegram', 'phone', 'email'];
+  const available = all.filter((t) => !collected[t]);
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let i = 0; i < available.length; i += 2) {
+    rows.push(
+      available.slice(i, i + 2).map((t) => ({ text: CONTACT_LABELS[t], callback_data: `contact_type:${t}` }))
+    );
+  }
+  const navRow: Array<{ text: string; callback_data: string }> = [];
+  if (canGoBack) navRow.push({ text: '← Back', callback_data: 'back' });
+  const count = Object.keys(collected).length;
+  if (count > 0) navRow.push({ text: `Done ✅ (${count})`, callback_data: 'contact_done' });
+  if (navRow.length > 0) rows.push(navRow);
+  return { inline_keyboard: rows };
+}
+
 function buildCountryInlineKeyboard(canGoBack: boolean) {
   const options = texts.countryOptions.filter((c) => c !== 'Other');
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
@@ -202,6 +228,18 @@ async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee',
       if (canGoBack) cityNav.push({ text: '← Back', callback_data: 'back' });
       cityNav.push({ text: 'Skip', callback_data: 'skip' });
       reply_markup = { inline_keyboard: [cityNav] };
+      break;
+    }
+
+    case 'contact': {
+      const collected = state.contactMethods || {};
+      const collectedStr = (Object.keys(collected) as ContactType[])
+        .map((t) => `✅ ${CONTACT_LABELS[t]}: ${collected[t]}`)
+        .join('\n');
+      text = collectedStr
+        ? `${collectedStr}\n\nWould you like to add another contact method?`
+        : texts.prompts.contact;
+      reply_markup = buildContactTypeKeyboard(collected, canGoBack);
       break;
     }
 
@@ -512,6 +550,7 @@ bot.on('callback_query', async (callbackQuery) => {
       return;
     }
     state.awaitingSubStep = undefined;
+    state.awaitingContactType = undefined;
     state.stepIndex -= 1;
     const prevStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string;
     await showStep(chatId, prevStep, state.role, telegramId);
@@ -521,6 +560,58 @@ bot.on('callback_query', async (callbackQuery) => {
   // ── Skip optional step ──
   if (data === 'skip') {
     if (!state || !chatId) return;
+    state.stepIndex += 1;
+    const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
+    if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
+    await showStep(chatId, nextStep, state.role, telegramId);
+    return;
+  }
+
+  // ── Contact type selected ──
+  if (data.startsWith('contact_type:')) {
+    if (!state || !chatId) return;
+    const contactType = data.slice('contact_type:'.length) as ContactType;
+    state.awaitingContactType = contactType;
+    const prompts: Record<ContactType, string> = {
+      telegram: texts.prompts.contactTelegram,
+      phone: texts.prompts.contactPhone,
+      email: texts.prompts.contactEmail,
+    };
+    await bot.editMessageText(prompts[contactType], {
+      chat_id: chatId,
+      message_id: state.currentMessageId,
+      reply_markup: { inline_keyboard: [[{ text: '← Back', callback_data: 'contact_back_to_types' }]] },
+    }).catch(() => {});
+    return;
+  }
+
+  // ── Back from contact entry to type selector ──
+  if (data === 'contact_back_to_types') {
+    if (!state || !chatId) return;
+    state.awaitingContactType = undefined;
+    const collected = state.contactMethods || {};
+    const collectedStr = (Object.keys(collected) as ContactType[])
+      .map((t) => `✅ ${CONTACT_LABELS[t]}: ${collected[t]}`)
+      .join('\n');
+    const prompt = collectedStr
+      ? `${collectedStr}\n\nWould you like to add another contact method?`
+      : texts.prompts.contact;
+    await bot.editMessageText(prompt, {
+      chat_id: chatId,
+      message_id: state.currentMessageId,
+      reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0),
+    }).catch(() => {});
+    return;
+  }
+
+  // ── Contact done ──
+  if (data === 'contact_done') {
+    if (!state || !chatId) return;
+    const collected = state.contactMethods || {};
+    if (Object.keys(collected).length === 0) return;
+    state.profile.contact = (Object.keys(collected) as ContactType[])
+      .map((t) => `${CONTACT_LABELS[t]}: ${collected[t]}`)
+      .join(', ');
     state.stepIndex += 1;
     const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
     if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
@@ -668,6 +759,35 @@ bot.on('message', async (msg: Message) => {
 
   // Normal text step
   const currentStep = ONBOARDING_STEPS[state.role][state.stepIndex] as OnboardingStep;
+
+  // Contact step: awaiting a typed value for a chosen contact type
+  if (currentStep === 'contact') {
+    if (!state.awaitingContactType) {
+      // No type chosen yet — nudge to use buttons
+      await bot.sendMessage(chatId, texts.messages.useButtons);
+      return;
+    }
+    if (!state.contactMethods) state.contactMethods = {};
+    state.contactMethods[state.awaitingContactType] = text;
+    state.awaitingContactType = undefined;
+    const collected = state.contactMethods;
+    const all: ContactType[] = ['telegram', 'phone', 'email'];
+    const remaining = all.filter((t) => !collected[t]);
+    const collectedStr = (Object.keys(collected) as ContactType[])
+      .map((t) => `✅ ${CONTACT_LABELS[t]}: ${collected[t]}`)
+      .join('\n');
+    const prompt = remaining.length > 0
+      ? `${collectedStr}\n\nWould you like to add another contact method?`
+      : `${collectedStr}\n\nAll contact methods added!`;
+    try {
+      await bot.editMessageText(prompt, {
+        chat_id: chatId,
+        message_id: state.currentMessageId,
+        reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0),
+      });
+    } catch { /* ignore no-op edits */ }
+    return;
+  }
 
   // Skills step: typing adds to selection; only Done advances
   if (currentStep === 'skills') {
