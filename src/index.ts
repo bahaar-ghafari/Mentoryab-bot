@@ -198,20 +198,27 @@ async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee',
     }
   }
 
+  const markup = reply_markup as TelegramBot.InlineKeyboardMarkup;
+
   if (state.currentMessageId) {
     try {
       await bot.editMessageText(text, {
         chat_id: chatId,
         message_id: state.currentMessageId,
-        reply_markup: reply_markup as TelegramBot.InlineKeyboardMarkup,
+        reply_markup: markup,
       });
-    } catch {
-      // message unchanged — ignore
+      return;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes('message is not modified')) {
+        console.error('editMessageText failed, sending new message:', msg);
+      }
     }
-  } else {
-    const sent = await bot.sendMessage(chatId, text, { reply_markup: reply_markup as TelegramBot.ReplyKeyboardMarkup });
-    state.currentMessageId = (sent as Message).message_id;
   }
+
+  // Fallback: send a fresh message and track its ID
+  const sent = await bot.sendMessage(chatId, text, { reply_markup: markup });
+  state.currentMessageId = (sent as Message).message_id;
 }
 
 // ── Onboarding finish ─────────────────────────────────────────────────────────
@@ -344,9 +351,7 @@ const startMentorOnboarding = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
   const state: UserState = { role: 'mentor', stepIndex: 0, profile: {}, selectedSkills: [] };
   userStates.set(telegramId, state);
-  const sent = await bot.sendMessage(chatId, `Let's create your mentor profile.\n\n${texts.prompts.name}`, {
-    reply_markup: { remove_keyboard: true },
-  });
+  const sent = await bot.sendMessage(chatId, `Let's create your mentor profile.\n\n${texts.prompts.name}`);
   state.currentMessageId = (sent as Message).message_id;
 };
 
@@ -355,9 +360,7 @@ const startMenteeOnboarding = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
   const state: UserState = { role: 'mentee', stepIndex: 0, profile: {}, selectedSkills: [] };
   userStates.set(telegramId, state);
-  const sent = await bot.sendMessage(chatId, `Let's create your mentee profile.\n\n${texts.prompts.name}`, {
-    reply_markup: { remove_keyboard: true },
-  });
+  const sent = await bot.sendMessage(chatId, `Let's create your mentee profile.\n\n${texts.prompts.name}`);
   state.currentMessageId = (sent as Message).message_id;
 };
 
