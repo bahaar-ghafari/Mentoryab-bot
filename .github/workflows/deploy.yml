@@ -4,10 +4,37 @@ on:
   push:
     branches: [main]
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
+env:
+  IMAGE: ghcr.io/bahaar-ghafari/mentoryab-bot
 
+jobs:
+  # ── 1. Build Docker image and push to GHCR ──────────────────────────────────
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}:latest,${{ env.IMAGE }}:${{ github.sha }}
+
+  # ── 2. Pull new image on VPS and restart ─────────────────────────────────────
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
     steps:
       - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.2.0
@@ -19,9 +46,16 @@ jobs:
           script: |
             set -e
             cd ${{ secrets.APP_DIR }}
+
+            # Pull latest docker-compose from repo (for schema/config changes)
             git pull origin main
-            npm ci
-            npm run build
-            npx prisma migrate deploy
-            pm2 restart mentoryab-bot || pm2 start dist/index.js --name mentoryab-bot
-            pm2 save
+
+            # Log in to GHCR and pull new image
+            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
+            docker compose pull bot
+
+            # Restart bot only (postgres keeps running)
+            docker compose up -d --no-deps bot
+
+            # Clean up old images
+            docker image prune -f
