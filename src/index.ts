@@ -132,7 +132,10 @@ function buildCountryInlineKeyboard(canGoBack: boolean) {
       options.slice(i, i + 2).map((c) => ({ text: c, callback_data: `country:${c}` }))
     );
   }
-  if (canGoBack) rows.push([{ text: '← Back', callback_data: 'back' }]);
+  const navRow: Array<{ text: string; callback_data: string }> = [];
+  if (canGoBack) navRow.push({ text: '← Back', callback_data: 'back' });
+  navRow.push({ text: 'Skip', callback_data: 'skip' });
+  rows.push(navRow);
   return { inline_keyboard: rows };
 }
 
@@ -192,6 +195,15 @@ async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee',
       text = texts.prompts.country;
       reply_markup = buildCountryInlineKeyboard(canGoBack);
       break;
+
+    case 'city': {
+      text = texts.prompts.city;
+      const cityNav: Array<{ text: string; callback_data: string }> = [];
+      if (canGoBack) cityNav.push({ text: '← Back', callback_data: 'back' });
+      cityNav.push({ text: 'Skip', callback_data: 'skip' });
+      reply_markup = { inline_keyboard: [cityNav] };
+      break;
+    }
 
     default: {
       const prompts = texts.prompts as Record<string, string>;
@@ -494,12 +506,25 @@ bot.on('callback_query', async (callbackQuery) => {
 
   // ── General back (previous step) ──
   if (data === 'back') {
-    if (!state || !chatId || state.stepIndex === 0) return;
+    if (!chatId) return;
+    if (!state || state.stepIndex === 0) {
+      await bot.sendMessage(chatId, 'Session expired. Please tap Become Mentor or Find Mentor to start again.');
+      return;
+    }
     state.awaitingSubStep = undefined;
-    // If backing out of a completed skills step, restore selection from profile
     state.stepIndex -= 1;
     const prevStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string;
     await showStep(chatId, prevStep, state.role, telegramId);
+    return;
+  }
+
+  // ── Skip optional step ──
+  if (data === 'skip') {
+    if (!state || !chatId) return;
+    state.stepIndex += 1;
+    const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
+    if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
+    await showStep(chatId, nextStep, state.role, telegramId);
     return;
   }
 
