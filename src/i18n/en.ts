@@ -4,6 +4,10 @@ export const texts = {
   startMenu: {
     joinMentors: 'Join',
     needMentor: 'Need',
+    match: 'Match',
+    busy: 'Busy',
+    available: 'Available',
+    help: 'Help',
   },
   mentorStart: 'Great! Let us create your mentor profile.\n\nWhat is your name?',
   menteeStart: 'Great! Let us create your mentee profile.\n\nWhat is your name?',
@@ -18,7 +22,7 @@ export const texts = {
     goals: 'What are your learning goals?',
   },
   messages: {
-    completeMenteeProfile: 'Please complete your mentee profile first with /mentee.',
+    completeMenteeProfile: 'Please complete your mentee profile first by tapping Need.',
     noMentorsAvailable: 'No mentors are available right now.',
     requestSent: 'Your request has been sent to {mentorName}.',
     requestNew: 'You have a new mentorship request from {menteeName}. Reply with /accept_{menteeId} or /decline_{menteeId}.',
@@ -26,7 +30,7 @@ export const texts = {
     requestDeclined: 'Request declined.',
     acceptedNotification: 'Your mentorship request was accepted. The mentor will contact you soon.',
     declinedNotification: 'Your mentorship request was declined.',
-    needMentorProfile: 'You need to create a mentor profile first.',
+    needMentorProfile: 'You need to create a mentor profile first by tapping Join.',
     busySet: 'You are now marked as busy and will not appear in mentor matches.',
     availableSet: 'You are now available for mentoring.',
     mentorNotFound: 'That mentor was not found.',
@@ -36,7 +40,7 @@ export const texts = {
     profileSummary: 'Profile summary:',
     topMentorMatches: 'Top mentor matches:',
     sendRequestInstruction: 'Send /request_{mentorId} to request this mentor.',
-    helpText: 'Use the main menu buttons to start:\nJoin - become a mentor\nNeed - find a mentor\nMatch - search available mentors\nBusy - mark yourself unavailable\nAvailable - mark yourself available\n/help - show this help screen',
+    helpText: 'Use the main menu buttons to start:\nJoin - become a mentor\nNeed - find a mentor\nMatch - search available mentors\nBusy - mark yourself unavailable\nAvailable - mark yourself available\nHelp - show this help screen',
   },
   skillOptions: [
     'Product management',

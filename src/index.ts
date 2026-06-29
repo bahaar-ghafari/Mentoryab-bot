@@ -34,8 +34,8 @@ function buildMainMenuKeyboard() {
   return {
     keyboard: [
       [{ text: texts.startMenu.joinMentors }, { text: texts.startMenu.needMentor }],
-      [{ text: '/match' }, { text: '/busy' }],
-      [{ text: '/available' }, { text: '/help' }],
+      [{ text: texts.startMenu.match }, { text: texts.startMenu.busy }],
+      [{ text: texts.startMenu.available }, { text: texts.startMenu.help }],
     ],
     resize_keyboard: true,
   };
@@ -92,8 +92,8 @@ const startMenteeOnboarding = async (msg: Message) => {
   await bot.sendMessage(chatId, texts.menteeStart);
 };
 
-bot.onText(/^Join mentors$/i, startMentorOnboarding);
-bot.onText(/^Need a mentor$/i, startMenteeOnboarding);
+bot.onText(/^Join$/i, startMentorOnboarding);
+bot.onText(/^Need$/i, startMenteeOnboarding);
 
 bot.onText(/\/mentor/, startMentorOnboarding);
 
@@ -104,7 +104,107 @@ bot.onText(/\/mentee/, async (msg: Message) => {
   await bot.sendMessage(chatId, texts.menteeStart);
 });
 
-bot.onText(/\/match/, async (msg: Message) => {
+const handleMatchRequest = async (msg: Message) => {
+  const chatId = msg.chat.id;
+  const telegramId = String(msg.from?.id);
+  const user = await prisma.user.findUnique({
+    where: { telegramId },
+    include: { menteeProfile: true },
+  });
+
+  if (!user?.menteeProfile) {
+    await bot.sendMessage(chatId, texts.messages.completeMenteeProfile);
+    return;
+  }
+
+  const mentors = await prisma.mentorProfile.findMany({
+    where: { availability: true },
+  });
+
+  const matches = findMentorMatches(
+    {
+      name: user.menteeProfile.name,
+      skillsNeeded: user.menteeProfile.skillsNeeded,
+      experienceYears: user.menteeProfile.experienceYears,
+      location: user.menteeProfile.location,
+    },
+    mentors.map((mentor) => ({
+      id: mentor.id,
+      name: mentor.name,
+      skills: mentor.skills,
+      experienceYears: mentor.experienceYears,
+      location: mentor.location,
+      availability: mentor.availability,
+    }))
+  );
+
+  if (!matches.length) {
+    await bot.sendMessage(chatId, texts.messages.noMentorsAvailable);
+    return;
+  }
+
+  const topMatches = matches.slice(0, 3);
+  let reply = texts.messages.topMentorMatches + '\n';
+  for (const mentor of topMatches) {
+    reply += `\n${mentor.name} — skills: ${mentor.skills.join(', ')} — experience: ${mentor.experienceYears} years — location: ${mentor.location || 'N/A'}\n`;
+  }
+
+  await bot.sendMessage(chatId, reply);
+};
+
+const handleSetBusy = async (msg: Message) => {
+  const chatId = msg.chat.id;
+  const telegramId = String(msg.from?.id);
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
+
+  if (!user?.mentorProfile) {
+    await bot.sendMessage(chatId, texts.messages.needMentorProfile);
+    return;
+  }
+
+  await prisma.mentorProfile.update({
+    where: { id: user.mentorProfile.id },
+    data: { availability: false },
+  });
+
+  await bot.sendMessage(chatId, texts.messages.busySet);
+};
+
+const handleSetAvailable = async (msg: Message) => {
+  const chatId = msg.chat.id;
+  const telegramId = String(msg.from?.id);
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
+
+  if (!user?.mentorProfile) {
+    await bot.sendMessage(chatId, texts.messages.needMentorProfile);
+    return;
+  }
+
+  await prisma.mentorProfile.update({
+    where: { id: user.mentorProfile.id },
+    data: { availability: true },
+  });
+
+  await bot.sendMessage(chatId, texts.messages.availableSet);
+};
+
+const handleHelp = async (msg: Message) => {
+  await bot.sendMessage(msg.chat.id, texts.messages.helpText);
+};
+
+bot.onText(/\/match/, handleMatchRequest);
+bot.onText(/^Match$/i, handleMatchRequest);
+
+bot.onText(/\/busy/, handleSetBusy);
+bot.onText(/^Busy$/i, handleSetBusy);
+
+bot.onText(/\/available/, handleSetAvailable);
+bot.onText(/^Available$/i, handleSetAvailable);
+
+bot.onText(/\/help/, handleHelp);
+bot.onText(/^Help$/i, handleHelp);
+
+bot.onText(/\/request_(\d+)/, async (msg: Message, match: RegExpExecArray | null) => {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
   const user = await prisma.user.findUnique({
@@ -238,46 +338,6 @@ bot.onText(/\/decline_(\d+)/, async (msg: Message, match: RegExpExecArray | null
   if (menteeUser) {
     await bot.sendMessage(Number(menteeUser.telegramId), texts.messages.declinedNotification);
   }
-});
-
-bot.onText(/\/busy/, async (msg: Message) => {
-  const chatId = msg.chat.id;
-  const telegramId = String(msg.from?.id);
-  const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
-
-  if (!user?.mentorProfile) {
-    await bot.sendMessage(chatId, 'You need to create a mentor profile first.');
-    return;
-  }
-
-  await prisma.mentorProfile.update({
-    where: { id: user.mentorProfile.id },
-    data: { availability: false },
-  });
-
-  await bot.sendMessage(chatId, texts.messages.busySet);
-});
-
-bot.onText(/\/available/, async (msg: Message) => {
-  const chatId = msg.chat.id;
-  const telegramId = String(msg.from?.id);
-  const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
-
-  if (!user?.mentorProfile) {
-    await bot.sendMessage(chatId, texts.messages.needMentorProfile);
-    return;
-  }
-
-  await prisma.mentorProfile.update({
-    where: { id: user.mentorProfile.id },
-    data: { availability: true },
-  });
-
-  await bot.sendMessage(chatId, texts.messages.availableSet);
-});
-
-bot.onText(/\/help/, async (msg: Message) => {
-  await bot.sendMessage(msg.chat.id, texts.messages.helpText);
 });
 
 bot.on('message', async (msg: Message) => {
