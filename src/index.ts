@@ -344,8 +344,9 @@ const startMentorOnboarding = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
   const state: UserState = { role: 'mentor', stepIndex: 0, profile: {}, selectedSkills: [] };
   userStates.set(telegramId, state);
-  await bot.sendMessage(chatId, "Let's create your mentor profile.", { reply_markup: { remove_keyboard: true } });
-  const sent = await bot.sendMessage(chatId, texts.prompts.name);
+  const sent = await bot.sendMessage(chatId, `Let's create your mentor profile.\n\n${texts.prompts.name}`, {
+    reply_markup: { remove_keyboard: true },
+  });
   state.currentMessageId = (sent as Message).message_id;
 };
 
@@ -354,8 +355,9 @@ const startMenteeOnboarding = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
   const state: UserState = { role: 'mentee', stepIndex: 0, profile: {}, selectedSkills: [] };
   userStates.set(telegramId, state);
-  await bot.sendMessage(chatId, "Let's create your mentee profile.", { reply_markup: { remove_keyboard: true } });
-  const sent = await bot.sendMessage(chatId, texts.prompts.name);
+  const sent = await bot.sendMessage(chatId, `Let's create your mentee profile.\n\n${texts.prompts.name}`, {
+    reply_markup: { remove_keyboard: true },
+  });
   state.currentMessageId = (sent as Message).message_id;
 };
 
