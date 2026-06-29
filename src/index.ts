@@ -11,13 +11,15 @@ const ONBOARDING_STEPS = {
 } as const;
 
 type OnboardingStep = typeof ONBOARDING_STEPS['mentor'][number] | typeof ONBOARDING_STEPS['mentee'][number];
-type SubStep = 'year' | 'month' | 'customCountry';
+type SubStep = 'year' | 'month' | 'customCountry' | 'customSkill';
 
 interface UserState {
   role: 'mentor' | 'mentee';
   stepIndex: number;
   profile: Record<string, string>;
   awaitingSubStep?: SubStep;
+  currentMessageId?: number;
+  selectedSkills: string[];
 }
 
 dotenv.config();
@@ -34,15 +36,35 @@ function format(text: string, values: Record<string, string | number> = {}) {
   return text.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ''));
 }
 
-function buildSkillKeyboard() {
-  return {
-    keyboard: texts.skillOptions.map((skill) => [{ text: skill }]).concat([[{ text: 'Other' }]]),
-    one_time_keyboard: true,
-    resize_keyboard: true,
-  };
+// ── Inline keyboard builders ──────────────────────────────────────────────────
+
+function buildSkillsInlineKeyboard(selected: string[], canGoBack: boolean) {
+  const options = texts.skillOptions.filter((s) => s !== 'Other');
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+
+  for (let i = 0; i < options.length; i += 2) {
+    rows.push(
+      options.slice(i, i + 2).map((skill) => ({
+        text: selected.includes(skill) ? `✓ ${skill}` : skill,
+        callback_data: `toggle_skill:${skill}`,
+      }))
+    );
+  }
+
+  rows.push([{ text: '✏️ Type custom', callback_data: 'custom_skill' }]);
+
+  const actionRow: Array<{ text: string; callback_data: string }> = [];
+  if (canGoBack) actionRow.push({ text: '← Back', callback_data: 'back' });
+  actionRow.push({
+    text: selected.length > 0 ? `Done ✓ (${selected.length})` : 'Done',
+    callback_data: 'skill_done',
+  });
+  rows.push(actionRow);
+
+  return { inline_keyboard: rows };
 }
 
-function buildYearKeyboard() {
+function buildYearKeyboard(canGoBack: boolean) {
   const currentYear = new Date().getFullYear();
   const years: string[] = [];
   for (let y = 1990; y <= currentYear; y++) years.push(String(y));
@@ -50,6 +72,7 @@ function buildYearKeyboard() {
   for (let i = 0; i < years.length; i += 5) {
     rows.push(years.slice(i, i + 5).map((y) => ({ text: y, callback_data: `startyear:${y}` })));
   }
+  if (canGoBack) rows.push([{ text: '← Back', callback_data: 'back' }]);
   return { inline_keyboard: rows };
 }
 
@@ -63,15 +86,23 @@ function buildMonthKeyboard(year: string) {
       }))
     );
   }
+  rows.push([{ text: '← Back to years', callback_data: 'back_to_years' }]);
   return { inline_keyboard: rows };
 }
 
-function buildCountryKeyboard() {
-  return {
-    keyboard: texts.countryOptions.map((c) => [{ text: c }]),
-    one_time_keyboard: true,
-    resize_keyboard: true,
-  };
+function buildCountryInlineKeyboard(canGoBack: boolean) {
+  const options = texts.countryOptions.filter((c) => c !== 'Other');
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let i = 0; i < options.length; i += 2) {
+    rows.push(
+      options.slice(i, i + 2).map((c) => ({ text: c, callback_data: `country:${c}` }))
+    );
+  }
+  const lastRow: Array<{ text: string; callback_data: string }> = [];
+  if (canGoBack) lastRow.push({ text: '← Back', callback_data: 'back' });
+  lastRow.push({ text: '✏️ Type custom', callback_data: 'country_other' });
+  rows.push(lastRow);
+  return { inline_keyboard: rows };
 }
 
 function buildMainMenuKeyboard(isMentor = false, isAdmin = false) {
@@ -85,54 +116,79 @@ function buildMainMenuKeyboard(isMentor = false, isAdmin = false) {
     keyboard.push([{ text: texts.startMenu.adminRestart }]);
   }
   keyboard.push([{ text: texts.startMenu.help }]);
-  return {
-    keyboard,
-    resize_keyboard: true,
-  };
+  return { keyboard, resize_keyboard: true };
 }
 
 function calcExperienceYears(startDateStr: string): number {
   const [year, month] = startDateStr.split('-').map(Number);
   const now = new Date();
   const years = now.getFullYear() - year;
-  const monthDiff = now.getMonth() + 1 - month;
-  return Math.max(0, monthDiff < 0 ? years - 1 : years);
+  return Math.max(0, now.getMonth() + 1 < month ? years - 1 : years);
 }
 
-if (!token) {
-  throw new Error('TELEGRAM_BOT_TOKEN is required');
-}
+// ── Core step renderer ────────────────────────────────────────────────────────
 
-const bot = new TelegramBot(token, { polling: true });
+async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee', telegramId: string) {
+  const state = userStates.get(telegramId);
+  if (!state) return;
 
-const userStates = new Map<string, UserState>();
-const pendingRequests = new Map<string, { mentorId: number; menteeId: number }>();
+  const canGoBack = state.stepIndex > 0;
+  const backBtn = { text: '← Back', callback_data: 'back' };
 
-async function sendStepPrompt(chatId: number, step: string, role: 'mentor' | 'mentee', telegramId: string) {
-  if (step === 'skills') {
-    const prompt = role === 'mentor' ? texts.prompts.skillsMentor : texts.prompts.skillsMentee;
-    await bot.sendMessage(chatId, prompt, { reply_markup: buildSkillKeyboard() });
-  } else if (step === 'experience') {
-    const state = userStates.get(telegramId);
-    if (state) state.awaitingSubStep = 'year';
-    await bot.sendMessage(chatId, texts.prompts.experience, { reply_markup: buildYearKeyboard() });
-  } else if (step === 'country') {
-    await bot.sendMessage(chatId, texts.prompts.country, { reply_markup: buildCountryKeyboard() });
-  } else if (step === 'city') {
-    await bot.sendMessage(chatId, texts.prompts.city, { reply_markup: { remove_keyboard: true } });
+  let text: string;
+  let reply_markup: object;
+
+  switch (step) {
+    case 'skills':
+      text = role === 'mentor' ? texts.prompts.skillsMentor : texts.prompts.skillsMentee;
+      reply_markup = buildSkillsInlineKeyboard(state.selectedSkills, canGoBack);
+      break;
+
+    case 'experience':
+      state.awaitingSubStep = 'year';
+      text = texts.prompts.experience;
+      reply_markup = buildYearKeyboard(canGoBack);
+      break;
+
+    case 'country':
+      text = texts.prompts.country;
+      reply_markup = buildCountryInlineKeyboard(canGoBack);
+      break;
+
+    default: {
+      const prompts = texts.prompts as Record<string, string>;
+      text = prompts[step] ?? texts.messages.pleaseContinue;
+      reply_markup = canGoBack
+        ? { inline_keyboard: [[backBtn]] }
+        : { inline_keyboard: [] as unknown[] };
+    }
+  }
+
+  if (state.currentMessageId) {
+    try {
+      await bot.editMessageText(text, {
+        chat_id: chatId,
+        message_id: state.currentMessageId,
+        reply_markup: reply_markup as TelegramBot.InlineKeyboardMarkup,
+      });
+    } catch {
+      // message unchanged — ignore
+    }
   } else {
-    const prompts = texts.prompts as Record<string, string>;
-    await bot.sendMessage(chatId, prompts[step] ?? texts.messages.pleaseContinue);
+    const sent = await bot.sendMessage(chatId, text, { reply_markup: reply_markup as TelegramBot.ReplyKeyboardMarkup });
+    state.currentMessageId = (sent as Message).message_id;
   }
 }
 
+// ── Onboarding finish ─────────────────────────────────────────────────────────
+
 async function finishOnboarding(chatId: number, telegramId: string, state: UserState) {
   const roleText = state.role === 'mentor' ? 'mentor' : 'mentee';
-  const location = state.profile.city && state.profile.country
-    ? `${state.profile.city}, ${state.profile.country}`
-    : state.profile.country || state.profile.city || null;
+  const location =
+    state.profile.city && state.profile.country
+      ? `${state.profile.city}, ${state.profile.country}`
+      : state.profile.country || state.profile.city || null;
   const experienceYears = state.profile.experience ? calcExperienceYears(state.profile.experience) : 0;
-
   const isMentorNow = state.role === 'mentor';
 
   await prisma.user.update({
@@ -144,7 +200,7 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
             mentorProfile: {
               create: {
                 name: state.profile.name || 'Mentor',
-                skills: (state.profile.skills || '').split(',').map((item) => item.trim()).filter(Boolean),
+                skills: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
                 experienceYears,
                 location,
                 contactMethod: state.profile.contact || null,
@@ -156,7 +212,7 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
               create: {
                 name: state.profile.name || 'Mentee',
                 goals: state.profile.goals || null,
-                skillsNeeded: (state.profile.skills || '').split(',').map((item) => item.trim()).filter(Boolean),
+                skillsNeeded: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
                 experienceYears,
                 location,
               },
@@ -170,21 +226,39 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
   const summary = [
     `Name: ${state.profile.name}`,
     `Skills: ${state.profile.skills}`,
-    state.profile.experience ? `Started career: ${state.profile.experience}` : null,
+    state.profile.experience ? `Career start: ${state.profile.experience}` : null,
     location ? `Location: ${location}` : null,
     state.profile.contact ? `Contact: ${state.profile.contact}` : null,
     state.profile.goals ? `Goals: ${state.profile.goals}` : null,
   ].filter(Boolean).join('\n');
 
-  await bot.sendMessage(chatId, `Thanks! Your ${roleText} profile is ready.\n\n${summary}`);
+  // Edit the tracked message to show the summary
+  if (state.currentMessageId) {
+    try {
+      await bot.editMessageText(`Your ${roleText} profile is ready!\n\n${summary}`, {
+        chat_id: chatId,
+        message_id: state.currentMessageId,
+        reply_markup: { inline_keyboard: [] },
+      });
+    } catch { /* ignore */ }
+  }
+
   await bot.sendMessage(chatId, texts.chooseRole, {
     reply_markup: buildMainMenuKeyboard(isMentorNow, adminIds.has(telegramId)),
   });
 }
 
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok' });
-});
+// ── Express & bot setup ───────────────────────────────────────────────────────
+
+if (!token) throw new Error('TELEGRAM_BOT_TOKEN is required');
+
+const bot = new TelegramBot(token, { polling: true });
+const userStates = new Map<string, UserState>();
+const pendingRequests = new Map<string, { mentorId: number; menteeId: number }>();
+
+app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+
+// ── Admin slash commands ──────────────────────────────────────────────────────
 
 bot.onText(/\/myid/, async (msg: Message) => {
   await bot.sendMessage(msg.chat.id, `Your Telegram ID: ${msg.from?.id}`);
@@ -195,25 +269,20 @@ bot.onText(/\/mentors/, async (msg: Message) => {
   if (!adminIds.has(telegramId)) return;
 
   const mentors = await prisma.mentorProfile.findMany({ orderBy: { createdAt: 'asc' } });
-  if (!mentors.length) {
-    await bot.sendMessage(msg.chat.id, 'No mentors registered yet.');
-    return;
-  }
+  if (!mentors.length) { await bot.sendMessage(msg.chat.id, 'No mentors registered yet.'); return; }
 
-  const lines = mentors.map((m, i) => {
-    const status = m.availability ? 'Available' : 'Busy';
-    const exp = m.experienceYears === 1 ? '1 yr' : `${m.experienceYears} yrs`;
-    return [
-      `${i + 1}. ${m.name} [${status}]`,
-      `   Skills: ${m.skills.join(', ')}`,
-      `   Exp: ${exp}`,
-      m.location ? `   Location: ${m.location}` : null,
-      m.contactMethod ? `   Contact: ${m.contactMethod}` : null,
-    ].filter(Boolean).join('\n');
-  });
+  const lines = mentors.map((m, i) => [
+    `${i + 1}. ${m.name} [${m.availability ? 'Available' : 'Busy'}]`,
+    `   Skills: ${m.skills.join(', ')}`,
+    `   Exp: ${m.experienceYears} yr${m.experienceYears !== 1 ? 's' : ''}`,
+    m.location ? `   Location: ${m.location}` : null,
+    m.contactMethod ? `   Contact: ${m.contactMethod}` : null,
+  ].filter(Boolean).join('\n'));
 
-  await bot.sendMessage(msg.chat.id, lines.join('\n\n'));
+  await bot.sendMessage(msg.chat.id, `Mentors (${mentors.length}):\n\n${lines.join('\n\n')}`);
 });
+
+// ── /start ────────────────────────────────────────────────────────────────────
 
 bot.onText(/\/start/, async (msg: Message) => {
   const chatId = msg.chat.id;
@@ -221,17 +290,8 @@ bot.onText(/\/start/, async (msg: Message) => {
 
   await prisma.user.upsert({
     where: { telegramId },
-    update: {
-      firstName: msg.from?.first_name || null,
-      lastName: msg.from?.last_name || null,
-      username: msg.from?.username || null,
-    },
-    create: {
-      telegramId,
-      firstName: msg.from?.first_name || null,
-      lastName: msg.from?.last_name || null,
-      username: msg.from?.username || null,
-    },
+    update: { firstName: msg.from?.first_name || null, lastName: msg.from?.last_name || null, username: msg.from?.username || null },
+    create: { telegramId, firstName: msg.from?.first_name || null, lastName: msg.from?.last_name || null, username: msg.from?.username || null },
   });
 
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
@@ -240,110 +300,71 @@ bot.onText(/\/start/, async (msg: Message) => {
   });
 });
 
+// ── Onboarding starters ───────────────────────────────────────────────────────
+
 const startMentorOnboarding = async (msg: Message) => {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
-  userStates.set(telegramId, { role: 'mentor', stepIndex: 0, profile: {} });
-  await bot.sendMessage(chatId, texts.mentorStart);
+  const state: UserState = { role: 'mentor', stepIndex: 0, profile: {}, selectedSkills: [] };
+  userStates.set(telegramId, state);
+  await bot.sendMessage(chatId, "Let's create your mentor profile.", { reply_markup: { remove_keyboard: true } });
+  const sent = await bot.sendMessage(chatId, texts.prompts.name);
+  state.currentMessageId = (sent as Message).message_id;
 };
 
 const startMenteeOnboarding = async (msg: Message) => {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
-  userStates.set(telegramId, { role: 'mentee', stepIndex: 0, profile: {} });
-  await bot.sendMessage(chatId, texts.menteeStart);
+  const state: UserState = { role: 'mentee', stepIndex: 0, profile: {}, selectedSkills: [] };
+  userStates.set(telegramId, state);
+  await bot.sendMessage(chatId, "Let's create your mentee profile.", { reply_markup: { remove_keyboard: true } });
+  const sent = await bot.sendMessage(chatId, texts.prompts.name);
+  state.currentMessageId = (sent as Message).message_id;
 };
 
 bot.onText(/^Become Mentor$/i, startMentorOnboarding);
 bot.onText(/^Find Mentor$/i, startMenteeOnboarding);
 
+// ── Menu action handlers ──────────────────────────────────────────────────────
+
 const handleMatchRequest = async (msg: Message) => {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
-  const user = await prisma.user.findUnique({
-    where: { telegramId },
-    include: { menteeProfile: true },
-  });
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { menteeProfile: true } });
 
-  if (!user?.menteeProfile) {
-    await bot.sendMessage(chatId, texts.messages.completeMenteeProfile);
-    return;
-  }
+  if (!user?.menteeProfile) { await bot.sendMessage(chatId, texts.messages.completeMenteeProfile); return; }
 
-  const mentors = await prisma.mentorProfile.findMany({
-    where: { availability: true },
-  });
-
+  const mentors = await prisma.mentorProfile.findMany({ where: { availability: true } });
   const matches = findMentorMatches(
-    {
-      name: user.menteeProfile.name,
-      skillsNeeded: user.menteeProfile.skillsNeeded,
-      experienceYears: user.menteeProfile.experienceYears,
-      location: user.menteeProfile.location,
-    },
-    mentors.map((mentor) => ({
-      id: mentor.id,
-      name: mentor.name,
-      skills: mentor.skills,
-      experienceYears: mentor.experienceYears,
-      location: mentor.location,
-      availability: mentor.availability,
-    }))
+    { name: user.menteeProfile.name, skillsNeeded: user.menteeProfile.skillsNeeded, experienceYears: user.menteeProfile.experienceYears, location: user.menteeProfile.location },
+    mentors.map((m) => ({ id: m.id, name: m.name, skills: m.skills, experienceYears: m.experienceYears, location: m.location, availability: m.availability }))
   );
 
-  if (!matches.length) {
-    await bot.sendMessage(chatId, texts.messages.noMentorsAvailable);
-    return;
-  }
+  if (!matches.length) { await bot.sendMessage(chatId, texts.messages.noMentorsAvailable); return; }
 
   const topMatches = matches.slice(0, 3);
   let reply = texts.messages.topMentorMatches + '\n';
-  const inlineKeyboard = topMatches.map((mentor) => [
-    { text: `Request ${mentor.name}`, callback_data: `request:${mentor.id}` },
-  ]);
-  for (const mentor of topMatches) {
-    reply += `\n${mentor.name} — skills: ${mentor.skills.join(', ')} — experience: ${mentor.experienceYears} years — location: ${mentor.location || 'N/A'}\n`;
+  const inlineKeyboard = topMatches.map((m) => [{ text: `Request ${m.name}`, callback_data: `request:${m.id}` }]);
+  for (const m of topMatches) {
+    reply += `\n${m.name} — skills: ${m.skills.join(', ')} — exp: ${m.experienceYears}y — location: ${m.location || 'N/A'}\n`;
   }
-
-  await bot.sendMessage(chatId, reply, {
-    reply_markup: { inline_keyboard: inlineKeyboard },
-  });
+  await bot.sendMessage(chatId, reply, { reply_markup: { inline_keyboard: inlineKeyboard } });
 };
 
 const handleSetBusy = async (msg: Message) => {
-  const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
-
-  if (!user?.mentorProfile) {
-    await bot.sendMessage(chatId, texts.messages.needMentorProfile);
-    return;
-  }
-
-  await prisma.mentorProfile.update({
-    where: { id: user.mentorProfile.id },
-    data: { availability: false },
-  });
-
-  await bot.sendMessage(chatId, texts.messages.busySet);
+  if (!user?.mentorProfile) { await bot.sendMessage(msg.chat.id, texts.messages.needMentorProfile); return; }
+  await prisma.mentorProfile.update({ where: { id: user.mentorProfile.id }, data: { availability: false } });
+  await bot.sendMessage(msg.chat.id, texts.messages.busySet);
 };
 
 const handleSetAvailable = async (msg: Message) => {
-  const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
-
-  if (!user?.mentorProfile) {
-    await bot.sendMessage(chatId, texts.messages.needMentorProfile);
-    return;
-  }
-
-  await prisma.mentorProfile.update({
-    where: { id: user.mentorProfile.id },
-    data: { availability: true },
-  });
-
-  await bot.sendMessage(chatId, texts.messages.availableSet);
+  if (!user?.mentorProfile) { await bot.sendMessage(msg.chat.id, texts.messages.needMentorProfile); return; }
+  await prisma.mentorProfile.update({ where: { id: user.mentorProfile.id }, data: { availability: true } });
+  await bot.sendMessage(msg.chat.id, texts.messages.availableSet);
 };
 
 const handleHelp = async (msg: Message) => {
@@ -353,51 +374,30 @@ const handleHelp = async (msg: Message) => {
 const handleAdminMentorsList = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
   if (!adminIds.has(telegramId)) return;
-
   const mentors = await prisma.mentorProfile.findMany({ orderBy: { createdAt: 'asc' } });
-  if (!mentors.length) {
-    await bot.sendMessage(msg.chat.id, 'No mentors registered yet.');
-    return;
-  }
-
-  const lines = mentors.map((m, i) => {
-    const status = m.availability ? 'Available' : 'Busy';
-    const exp = m.experienceYears === 1 ? '1 yr' : `${m.experienceYears} yrs`;
-    return [
-      `${i + 1}. ${m.name} [${status}]`,
-      `   Skills: ${m.skills.join(', ')}`,
-      `   Exp: ${exp}`,
-      m.location ? `   Location: ${m.location}` : null,
-      m.contactMethod ? `   Contact: ${m.contactMethod}` : null,
-    ].filter(Boolean).join('\n');
-  });
-
+  if (!mentors.length) { await bot.sendMessage(msg.chat.id, 'No mentors registered yet.'); return; }
+  const lines = mentors.map((m, i) => [
+    `${i + 1}. ${m.name} [${m.availability ? 'Available' : 'Busy'}]`,
+    `   Skills: ${m.skills.join(', ')}`,
+    `   Exp: ${m.experienceYears} yr${m.experienceYears !== 1 ? 's' : ''}`,
+    m.location ? `   Location: ${m.location}` : null,
+    m.contactMethod ? `   Contact: ${m.contactMethod}` : null,
+  ].filter(Boolean).join('\n'));
   await bot.sendMessage(msg.chat.id, `Mentors (${mentors.length}):\n\n${lines.join('\n\n')}`);
 };
 
 const handleAdminMenteesList = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
   if (!adminIds.has(telegramId)) return;
-
   const mentees = await prisma.menteeProfile.findMany({ orderBy: { createdAt: 'asc' } });
-  if (!mentees.length) {
-    await bot.sendMessage(msg.chat.id, 'No mentees registered yet.');
-    return;
-  }
-
-  const lines = mentees.map((m, i) => {
-    const exp = m.experienceYears != null
-      ? (m.experienceYears === 1 ? '1 yr' : `${m.experienceYears} yrs`)
-      : null;
-    return [
-      `${i + 1}. ${m.name}`,
-      `   Skills: ${m.skillsNeeded.join(', ')}`,
-      exp ? `   Exp: ${exp}` : null,
-      m.location ? `   Location: ${m.location}` : null,
-      m.goals ? `   Goals: ${m.goals}` : null,
-    ].filter(Boolean).join('\n');
-  });
-
+  if (!mentees.length) { await bot.sendMessage(msg.chat.id, 'No mentees registered yet.'); return; }
+  const lines = mentees.map((m, i) => [
+    `${i + 1}. ${m.name}`,
+    `   Skills: ${m.skillsNeeded.join(', ')}`,
+    m.experienceYears != null ? `   Exp: ${m.experienceYears} yr${m.experienceYears !== 1 ? 's' : ''}` : null,
+    m.location ? `   Location: ${m.location}` : null,
+    m.goals ? `   Goals: ${m.goals}` : null,
+  ].filter(Boolean).join('\n'));
   await bot.sendMessage(msg.chat.id, `Mentees (${mentees.length}):\n\n${lines.join('\n\n')}`);
 };
 
@@ -408,98 +408,190 @@ const handleAdminRestart = async (msg: Message) => {
   setTimeout(() => process.exit(0), 500);
 };
 
+// ── Callback query handler ────────────────────────────────────────────────────
+
 bot.on('callback_query', async (callbackQuery) => {
   if (!callbackQuery.data) return;
   const data = callbackQuery.data as string;
   const chatId = callbackQuery.message?.chat.id;
   const telegramId = String(callbackQuery.from?.id);
+  const state = userStates.get(telegramId);
 
-  // Year selected from career start date picker
-  if (data.startsWith('startyear:')) {
-    const year = data.split(':')[1];
-    const state = userStates.get(telegramId);
-    if (!state || state.awaitingSubStep !== 'year') return;
-    state.profile.startYear = year;
-    state.awaitingSubStep = 'month';
-    if (chatId) {
-      await bot.sendMessage(chatId, `${texts.prompts.experienceMonth}`, {
-        reply_markup: buildMonthKeyboard(year),
-      });
-    }
-    await bot.answerCallbackQuery(callbackQuery.id);
-    return;
-  }
+  await bot.answerCallbackQuery(callbackQuery.id).catch(() => {});
 
-  // Month selected from career start date picker
-  if (data.startsWith('startmonth:')) {
-    const [, year, monthStr] = data.split(':');
-    const state = userStates.get(telegramId);
-    if (!state || state.awaitingSubStep !== 'month') return;
-    const monthName = MONTH_SHORT[Number(monthStr) - 1];
-    state.profile.experience = `${year}-${monthStr}`;
-    state.awaitingSubStep = undefined;
-    state.stepIndex += 1;
-    await bot.answerCallbackQuery(callbackQuery.id);
-    if (chatId) {
-      await bot.sendMessage(chatId, `Career start: ${monthName} ${year}`);
-      const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
-      if (!nextStep) {
-        await finishOnboarding(chatId, telegramId, state);
-      } else {
-        await sendStepPrompt(chatId, nextStep, state.role, telegramId);
-      }
-    }
-    return;
-  }
-
-  if (data.startsWith('request:')) {
-    const mentorId = Number(data.split(':')[1]);
-    const mentee = await prisma.user.findUnique({ where: { telegramId }, include: { menteeProfile: true } });
-    if (!mentee?.menteeProfile) {
-      if (chatId) await bot.sendMessage(chatId, texts.messages.completeMenteeProfile);
-      return;
-    }
-
-    const mentor = await prisma.mentorProfile.findUnique({ where: { id: mentorId } });
-    if (!mentor) {
-      if (chatId) await bot.sendMessage(chatId, texts.messages.mentorNotFound);
-      return;
-    }
-
-    const mentorUser = await prisma.user.findUnique({ where: { id: mentor.userId } });
-    if (!mentorUser) {
-      if (chatId) await bot.sendMessage(chatId, texts.messages.mentorUserNotFound);
-      return;
-    }
-
-    pendingRequests.set(`${mentorUser.telegramId}:${mentee.id}`, { mentorId: mentor.id, menteeId: mentee.id });
-    if (chatId) await bot.sendMessage(chatId, format(texts.messages.requestSent, { mentorName: mentor.name }));
-
-    const acceptDeclineKeyboard = {
-      inline_keyboard: [[
-        { text: 'Accept', callback_data: `accept:${mentee.id}` },
-        { text: 'Decline', callback_data: `decline:${mentee.id}` },
-      ]],
-    };
-
-    await bot.sendMessage(
-      Number(mentorUser.telegramId),
-      format(texts.messages.requestNew, { menteeName: mentee.menteeProfile.name, menteeId: mentee.id }),
-      { reply_markup: acceptDeclineKeyboard }
+  // ── Skill toggle ──
+  if (data.startsWith('toggle_skill:')) {
+    if (!state || !chatId) return;
+    const skill = data.slice('toggle_skill:'.length);
+    const idx = state.selectedSkills.indexOf(skill);
+    if (idx === -1) state.selectedSkills.push(skill);
+    else state.selectedSkills.splice(idx, 1);
+    await bot.editMessageReplyMarkup(
+      buildSkillsInlineKeyboard(state.selectedSkills, state.stepIndex > 0),
+      { chat_id: chatId, message_id: state.currentMessageId }
     );
     return;
   }
 
+  // ── Type custom skill ──
+  if (data === 'custom_skill') {
+    if (!state || !chatId) return;
+    state.awaitingSubStep = 'customSkill';
+    await bot.editMessageText('Type your skill(s), comma separated:', {
+      chat_id: chatId,
+      message_id: state.currentMessageId,
+      reply_markup: { inline_keyboard: [[{ text: '← Back to skills', callback_data: 'back_to_skills' }]] },
+    });
+    return;
+  }
+
+  // ── Back to skills from custom input ──
+  if (data === 'back_to_skills') {
+    if (!state || !chatId) return;
+    state.awaitingSubStep = undefined;
+    const prompt = state.role === 'mentor' ? texts.prompts.skillsMentor : texts.prompts.skillsMentee;
+    await bot.editMessageText(prompt, {
+      chat_id: chatId,
+      message_id: state.currentMessageId,
+      reply_markup: buildSkillsInlineKeyboard(state.selectedSkills, state.stepIndex > 0),
+    });
+    return;
+  }
+
+  // ── Skill done ──
+  if (data === 'skill_done') {
+    if (!state || !chatId) return;
+    state.profile.skills = state.selectedSkills.join(', ');
+    state.stepIndex += 1;
+    const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
+    if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
+    await showStep(chatId, nextStep, state.role, telegramId);
+    return;
+  }
+
+  // ── General back (previous step) ──
+  if (data === 'back') {
+    if (!state || !chatId || state.stepIndex === 0) return;
+    state.awaitingSubStep = undefined;
+    // If backing out of a completed skills step, restore selection from profile
+    state.stepIndex -= 1;
+    const prevStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string;
+    await showStep(chatId, prevStep, state.role, telegramId);
+    return;
+  }
+
+  // ── Year selected ──
+  if (data.startsWith('startyear:')) {
+    if (!state || !chatId) return;
+    const year = data.split(':')[1];
+    state.profile.startYear = year;
+    state.awaitingSubStep = 'month';
+    await bot.editMessageText(texts.prompts.experienceMonth, {
+      chat_id: chatId,
+      message_id: state.currentMessageId,
+      reply_markup: buildMonthKeyboard(year),
+    });
+    return;
+  }
+
+  // ── Back to years from month ──
+  if (data === 'back_to_years') {
+    if (!state || !chatId) return;
+    state.awaitingSubStep = 'year';
+    delete state.profile.startYear;
+    await bot.editMessageText(texts.prompts.experience, {
+      chat_id: chatId,
+      message_id: state.currentMessageId,
+      reply_markup: buildYearKeyboard(state.stepIndex > 0),
+    });
+    return;
+  }
+
+  // ── Month selected ──
+  if (data.startsWith('startmonth:')) {
+    if (!state || !chatId) return;
+    const [, year, monthStr] = data.split(':');
+    const monthName = MONTH_SHORT[Number(monthStr) - 1];
+    state.profile.experience = `${year}-${monthStr}`;
+    state.awaitingSubStep = undefined;
+    state.stepIndex += 1;
+    const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
+    if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
+    // Brief confirmation in the message before transitioning
+    try {
+      await bot.editMessageText(`Career start: ${monthName} ${year}`, {
+        chat_id: chatId,
+        message_id: state.currentMessageId,
+        reply_markup: { inline_keyboard: [] },
+      });
+    } catch { /* ignore */ }
+    await showStep(chatId, nextStep, state.role, telegramId);
+    return;
+  }
+
+  // ── Country selected ──
+  if (data.startsWith('country:')) {
+    if (!state || !chatId) return;
+    state.profile.country = data.slice('country:'.length);
+    state.stepIndex += 1;
+    const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
+    if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
+    await showStep(chatId, nextStep, state.role, telegramId);
+    return;
+  }
+
+  // ── Type custom country ──
+  if (data === 'country_other') {
+    if (!state || !chatId) return;
+    state.awaitingSubStep = 'customCountry';
+    await bot.editMessageText(texts.prompts.countryCustom, {
+      chat_id: chatId,
+      message_id: state.currentMessageId,
+      reply_markup: { inline_keyboard: [[{ text: '← Back to list', callback_data: 'back_to_countries' }]] },
+    });
+    return;
+  }
+
+  // ── Back to countries from custom input ──
+  if (data === 'back_to_countries') {
+    if (!state || !chatId) return;
+    state.awaitingSubStep = undefined;
+    await bot.editMessageText(texts.prompts.country, {
+      chat_id: chatId,
+      message_id: state.currentMessageId,
+      reply_markup: buildCountryInlineKeyboard(state.stepIndex > 0),
+    });
+    return;
+  }
+
+  // ── Mentorship request ──
+  if (data.startsWith('request:')) {
+    const mentorId = Number(data.split(':')[1]);
+    const mentee = await prisma.user.findUnique({ where: { telegramId }, include: { menteeProfile: true } });
+    if (!mentee?.menteeProfile) { if (chatId) await bot.sendMessage(chatId, texts.messages.completeMenteeProfile); return; }
+    const mentor = await prisma.mentorProfile.findUnique({ where: { id: mentorId } });
+    if (!mentor) { if (chatId) await bot.sendMessage(chatId, texts.messages.mentorNotFound); return; }
+    const mentorUser = await prisma.user.findUnique({ where: { id: mentor.userId } });
+    if (!mentorUser) { if (chatId) await bot.sendMessage(chatId, texts.messages.mentorUserNotFound); return; }
+
+    pendingRequests.set(`${mentorUser.telegramId}:${mentee.id}`, { mentorId: mentor.id, menteeId: mentee.id });
+    if (chatId) await bot.sendMessage(chatId, format(texts.messages.requestSent, { mentorName: mentor.name }));
+
+    await bot.sendMessage(
+      Number(mentorUser.telegramId),
+      format(texts.messages.requestNew, { menteeName: mentee.menteeProfile.name, menteeId: mentee.id }),
+      { reply_markup: { inline_keyboard: [[{ text: 'Accept', callback_data: `accept:${mentee.id}` }, { text: 'Decline', callback_data: `decline:${mentee.id}` }]] } }
+    );
+    return;
+  }
+
+  // ── Accept / Decline ──
   if (data.startsWith('accept:') || data.startsWith('decline:')) {
     const [action, menteeIdStr] = data.split(':');
     const menteeId = Number(menteeIdStr);
-    const mentorTelegramId = String(callbackQuery.from?.id);
-    const requestKey = `${mentorTelegramId}:${menteeId}`;
+    const requestKey = `${telegramId}:${menteeId}`;
     const request = pendingRequests.get(requestKey);
-    if (!request) {
-      if (chatId) await bot.sendMessage(chatId, texts.messages.noPendingRequest);
-      return;
-    }
+    if (!request) { if (chatId) await bot.sendMessage(chatId, texts.messages.noPendingRequest); return; }
 
     pendingRequests.delete(requestKey);
     const menteeUser = await prisma.user.findUnique({ where: { id: menteeId } });
@@ -510,21 +602,20 @@ bot.on('callback_query', async (callbackQuery) => {
       if (chatId) await bot.sendMessage(chatId, texts.messages.requestDeclined);
       if (menteeUser) await bot.sendMessage(Number(menteeUser.telegramId), texts.messages.declinedNotification);
     }
-    return;
   }
 });
 
+// ── Text message handler ──────────────────────────────────────────────────────
+
 bot.on('message', async (msg: Message) => {
-  if (!msg.text || msg.text.startsWith('/')) {
-    return;
-  }
+  if (!msg.text || msg.text.startsWith('/')) return;
 
   const text = msg.text;
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
   const state = userStates.get(telegramId);
+
   if (!state) {
-    // Become Mentor / Find Mentor are handled by onText above; only wire the rest here
     if (text === texts.startMenu.busy) { await handleSetBusy(msg); return; }
     if (text === texts.startMenu.available) { await handleSetAvailable(msg); return; }
     if (text === texts.startMenu.help) { await handleHelp(msg); return; }
@@ -534,51 +625,48 @@ bot.on('message', async (msg: Message) => {
     return;
   }
 
-  // While waiting for inline keyboard (year/month), reject text input
+  // Inline keyboard steps — reject freetext
   if (state.awaitingSubStep === 'year' || state.awaitingSubStep === 'month') {
     await bot.sendMessage(chatId, texts.messages.useButtons);
     return;
   }
 
-  // While waiting for custom country text input
-  if (state.awaitingSubStep === 'customCountry') {
-    if (!text.trim()) {
-      await bot.sendMessage(chatId, texts.prompts.countryCustom);
-      return;
+  // Custom skill text input
+  if (state.awaitingSubStep === 'customSkill') {
+    const typed = text.split(',').map((s) => s.trim()).filter(Boolean);
+    for (const s of typed) {
+      if (!state.selectedSkills.includes(s)) state.selectedSkills.push(s);
     }
+    state.awaitingSubStep = undefined;
+    const prompt = state.role === 'mentor' ? texts.prompts.skillsMentor : texts.prompts.skillsMentee;
+    await bot.editMessageText(prompt, {
+      chat_id: chatId,
+      message_id: state.currentMessageId,
+      reply_markup: buildSkillsInlineKeyboard(state.selectedSkills, state.stepIndex > 0),
+    });
+    return;
+  }
+
+  // Custom country text input
+  if (state.awaitingSubStep === 'customCountry') {
+    if (!text.trim()) { await bot.sendMessage(chatId, texts.prompts.countryCustom); return; }
     state.profile.country = text.trim();
     state.awaitingSubStep = undefined;
     state.stepIndex += 1;
     const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
-    if (!nextStep) {
-      await finishOnboarding(chatId, telegramId, state);
-    } else {
-      await sendStepPrompt(chatId, nextStep, state.role, telegramId);
-    }
+    if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
+    await showStep(chatId, nextStep, state.role, telegramId);
     return;
   }
 
+  // Normal text step
   const currentStep = ONBOARDING_STEPS[state.role][state.stepIndex] as OnboardingStep;
-
-  // If user selects "Other" for country, ask them to type it
-  if (currentStep === 'country' && text === 'Other') {
-    state.awaitingSubStep = 'customCountry';
-    await bot.sendMessage(chatId, texts.prompts.countryCustom, { reply_markup: { remove_keyboard: true } });
-    return;
-  }
-
   state.profile[currentStep] = text;
   state.stepIndex += 1;
 
   const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
-  if (!nextStep) {
-    await finishOnboarding(chatId, telegramId, state);
-    return;
-  }
-
-  await sendStepPrompt(chatId, nextStep, state.role, telegramId);
+  if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
+  await showStep(chatId, nextStep, state.role, telegramId);
 });
 
-app.listen(port, () => {
-  console.log(`Server listening on port ${port}`);
-});
+app.listen(port, () => console.log(`Server listening on port ${port}`));
