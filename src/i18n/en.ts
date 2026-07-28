@@ -35,6 +35,7 @@ export const texts = {
     completeMenteeProfile: 'Please complete your mentee profile first by tapping Find Mentor.',
     noMentorsAvailable: 'No mentors are available right now.',
     requestSent: 'Your request has been sent to {mentorName}.',
+    alreadyRequested: 'You have already sent a request to this mentor. Please wait for their response.',
     requestNew: 'You have a new mentorship request from {menteeName}. Tap Accept or Decline to respond.',
     requestAccepted: 'Request accepted. You can now connect with the mentee.',
     requestDeclined: 'Request declined.',

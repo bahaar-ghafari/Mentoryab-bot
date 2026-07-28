@@ -27,3 +27,23 @@ A Telegram-based mentorship bot MVP built with Node.js, TypeScript, Prisma, and 
 - `/decline_<menteeId>` to decline a request
 - `/busy` to hide your profile from matches
 - `/available` to show your profile again
+
+## Production deployment
+
+This repo includes a production compose file at `docker-compose.prod.yml` and a GitHub Actions workflow at `.github/workflows/deploy.yml`.
+
+Required GitHub repository secrets:
+- `SSH_HOST` — your VPS IP or hostname
+- `SSH_USER` — SSH user name
+- `SSH_PRIVATE_KEY` — private key for SSH login
+- `SSH_PORT` — SSH port (optional, defaults to 22)
+- `APP_DIR` — application directory on the VPS where the repo is checked out
+- `GHCR_USERNAME` — GitHub Container Registry username
+- `GHCR_TOKEN` — token for GHCR pull access
+
+Deploy workflow behavior:
+1. Build and push the Docker image to `ghcr.io/bahaar-ghafari/mentoryab-bot`
+2. SSH into the VPS
+3. Pull latest repo changes
+4. Pull the updated bot image
+5. Restart only the `bot` service via `docker compose -f docker-compose.prod.yml`

@@ -45,6 +45,17 @@ function format(text: string, values: Record<string, string | number> = {}) {
   return text.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ''));
 }
 
+function renderContactMethodsSummary(contactMethods?: Partial<Record<ContactType, string>>) {
+  if (!contactMethods || Object.keys(contactMethods).length === 0) return null;
+  return (Object.entries(contactMethods) as Array<[ContactType, string]>)
+    .map(([type, value]) => `${CONTACT_LABELS[type]}: ${value}`)
+    .join(', ');
+}
+
+function buildContactMethodsLabel(methods: string[]) {
+  return methods.length > 0 ? methods.join(', ') : null;
+}
+
 // ── Inline keyboard builders ──────────────────────────────────────────────────
 
 async function getSkillOptions(): Promise<string[]> {
@@ -286,6 +297,11 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
   const experienceYears = state.profile.experience ? calcExperienceYears(state.profile.experience) : 0;
   const isMentorNow = state.role === 'mentor';
 
+  const contactMethods = state.contactMethods
+    ? (Object.entries(state.contactMethods) as Array<[ContactType, string]>)
+        .map(([type, value]) => `${CONTACT_LABELS[type]}: ${value}`)
+    : [];
+
   await prisma.user.update({
     where: { telegramId },
     data: {
@@ -298,8 +314,10 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
                 title: state.profile.title || null,
                 skills: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
                 experienceYears,
+                country: state.profile.country || null,
+                city: state.profile.city || null,
                 location,
-                contactMethod: state.profile.contact || null,
+                contactMethods,
               },
             },
           }
@@ -310,6 +328,8 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
                 goals: state.profile.goals || null,
                 skillsNeeded: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
                 experienceYears,
+                country: state.profile.country || null,
+                city: state.profile.city || null,
                 location,
               },
             },
@@ -319,13 +339,14 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
 
   userStates.delete(telegramId);
 
+  const contactSummary = renderContactMethodsSummary(state.contactMethods);
   const summary = [
     `Name: ${state.profile.name}`,
     state.profile.title ? `Title: ${state.profile.title}` : null,
     `Skills: ${state.profile.skills}`,
     state.profile.experience ? `Career start: ${state.profile.experience}` : null,
     location ? `Location: ${location}` : null,
-    state.profile.contact ? `Contact: ${state.profile.contact}` : null,
+    contactSummary ? `Contact: ${contactSummary}` : null,
     state.profile.goals ? `Goals: ${state.profile.goals}` : null,
   ].filter(Boolean).join('\n');
 
@@ -351,8 +372,6 @@ if (!token) throw new Error('TELEGRAM_BOT_TOKEN is required');
 
 const bot = new TelegramBot(token, { polling: true });
 const userStates = new Map<string, UserState>();
-const pendingRequests = new Map<string, { mentorId: number; menteeId: number }>();
-
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
 // ── Admin slash commands ──────────────────────────────────────────────────────
@@ -374,13 +393,10 @@ bot.onText(/\/mentors/, async (msg: Message) => {
     `   Skills: ${m.skills.join(', ')}`,
     `   Exp: ${m.experienceYears} yr${m.experienceYears !== 1 ? 's' : ''}`,
     m.location ? `   Location: ${m.location}` : null,
-    m.contactMethod ? `   Contact: ${m.contactMethod}` : null,
+    m.contactMethods.length ? `   Contact: ${m.contactMethods.join(', ')}` : null,
   ].filter(Boolean).join('\n'));
-
   await bot.sendMessage(msg.chat.id, `Mentors (${mentors.length}):\n\n${lines.join('\n\n')}`);
 });
-
-// ── /start ────────────────────────────────────────────────────────────────────
 
 bot.onText(/\/start/, async (msg: Message) => {
   const chatId = msg.chat.id;
@@ -478,7 +494,7 @@ const handleAdminMentorsList = async (msg: Message) => {
     `   Skills: ${m.skills.join(', ')}`,
     `   Exp: ${m.experienceYears} yr${m.experienceYears !== 1 ? 's' : ''}`,
     m.location ? `   Location: ${m.location}` : null,
-    m.contactMethod ? `   Contact: ${m.contactMethod}` : null,
+    m.contactMethods.length ? `   Contact: ${m.contactMethods.join(', ')}` : null,
   ].filter(Boolean).join('\n'));
   await bot.sendMessage(msg.chat.id, `Mentors (${mentors.length}):\n\n${lines.join('\n\n')}`);
 };
@@ -609,9 +625,6 @@ bot.on('callback_query', async (callbackQuery) => {
     if (!state || !chatId) return;
     const collected = state.contactMethods || {};
     if (Object.keys(collected).length === 0) return;
-    state.profile.contact = (Object.keys(collected) as ContactType[])
-      .map((t) => `${CONTACT_LABELS[t]}: ${collected[t]}`)
-      .join(', ');
     state.stepIndex += 1;
     const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
     if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
@@ -700,34 +713,64 @@ bot.on('callback_query', async (callbackQuery) => {
     const mentorUser = await prisma.user.findUnique({ where: { id: mentor.userId } });
     if (!mentorUser) { if (chatId) await bot.sendMessage(chatId, texts.messages.mentorUserNotFound); return; }
 
-    pendingRequests.set(`${mentorUser.telegramId}:${mentee.id}`, { mentorId: mentor.id, menteeId: mentee.id });
-    if (chatId) await bot.sendMessage(chatId, format(texts.messages.requestSent, { mentorName: mentor.name }));
+    const existingRequest = await prisma.mentorshipRequest.findFirst({
+      where: {
+        mentorProfileId: mentor.id,
+        menteeProfileId: mentee.menteeProfile.id,
+        status: 'PENDING',
+      },
+    });
+    if (existingRequest) {
+      if (chatId) await bot.sendMessage(chatId, texts.messages.alreadyRequested);
+      return;
+    }
 
+    await prisma.mentorshipRequest.create({
+      data: {
+        mentorProfileId: mentor.id,
+        menteeProfileId: mentee.menteeProfile.id,
+      },
+    });
+
+    if (chatId) await bot.sendMessage(chatId, format(texts.messages.requestSent, { mentorName: mentor.name }));
     await bot.sendMessage(
       Number(mentorUser.telegramId),
-      format(texts.messages.requestNew, { menteeName: mentee.menteeProfile.name, menteeId: mentee.id }),
-      { reply_markup: { inline_keyboard: [[{ text: 'Accept', callback_data: `accept:${mentee.id}` }, { text: 'Decline', callback_data: `decline:${mentee.id}` }]] } }
+      format(texts.messages.requestNew, { menteeName: mentee.menteeProfile.name, menteeId: mentee.menteeProfile.id }),
+      { reply_markup: { inline_keyboard: [[{ text: 'Accept', callback_data: `accept:${mentee.menteeProfile.id}` }, { text: 'Decline', callback_data: `decline:${mentee.menteeProfile.id}` }]] } }
     );
     return;
   }
 
   // ── Accept / Decline ──
   if (data.startsWith('accept:') || data.startsWith('decline:')) {
-    const [action, menteeIdStr] = data.split(':');
-    const menteeId = Number(menteeIdStr);
-    const requestKey = `${telegramId}:${menteeId}`;
-    const request = pendingRequests.get(requestKey);
+    const [action, menteeProfileIdStr] = data.split(':');
+    const menteeProfileId = Number(menteeProfileIdStr);
+    const mentorUser = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
+    if (!mentorUser?.mentorProfile) { if (chatId) await bot.sendMessage(chatId, texts.messages.needMentorProfile); return; }
+
+    const request = await prisma.mentorshipRequest.findFirst({
+      where: {
+        mentorProfileId: mentorUser.mentorProfile.id,
+        menteeProfileId,
+        status: 'PENDING',
+      },
+    });
     if (!request) { if (chatId) await bot.sendMessage(chatId, texts.messages.noPendingRequest); return; }
 
-    pendingRequests.delete(requestKey);
-    const menteeUser = await prisma.user.findUnique({ where: { id: menteeId } });
+    await prisma.mentorshipRequest.update({
+      where: { id: request.id },
+      data: { status: action === 'accept' ? 'ACCEPTED' : 'DECLINED' },
+    });
+
+    const menteeProfile = await prisma.menteeProfile.findUnique({ where: { id: menteeProfileId }, include: { user: true } });
     if (action === 'accept') {
       if (chatId) await bot.sendMessage(chatId, texts.messages.requestAccepted);
-      if (menteeUser) await bot.sendMessage(Number(menteeUser.telegramId), texts.messages.acceptedNotification);
+      if (menteeProfile?.user) await bot.sendMessage(Number(menteeProfile.user.telegramId), texts.messages.acceptedNotification);
     } else {
       if (chatId) await bot.sendMessage(chatId, texts.messages.requestDeclined);
-      if (menteeUser) await bot.sendMessage(Number(menteeUser.telegramId), texts.messages.declinedNotification);
+      if (menteeProfile?.user) await bot.sendMessage(Number(menteeProfile.user.telegramId), texts.messages.declinedNotification);
     }
+    return;
   }
 });
 

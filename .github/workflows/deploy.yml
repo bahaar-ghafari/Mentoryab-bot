@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to VPS
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.10.0
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
@@ -47,15 +47,15 @@ jobs:
             set -e
             cd ${{ secrets.APP_DIR }}
 
-            # Pull latest docker-compose from repo (for schema/config changes)
+            # Pull latest repo changes including compose file
             git pull origin main
 
-            # Log in to GHCR and pull new image
+            # Authenticate to GHCR and pull the updated bot image
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
-            docker compose pull bot
+            docker compose -f docker-compose.prod.yml pull bot
 
-            # Restart bot only (postgres keeps running)
-            docker compose up -d --no-deps bot
+            # Restart bot service only
+            docker compose -f docker-compose.prod.yml up -d --no-deps bot
 
-            # Clean up old images
+            # Cleanup old images
             docker image prune -f

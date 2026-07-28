@@ -1,0 +1,55 @@
+# Production Docker Compose for Mentoryab bot.
+# This file is intended for VPS deployment alongside a sibling .env file
+# that contains secrets like TELEGRAM_BOT_TOKEN and DATABASE_URL.
+#
+# Required .env variables:
+#   TELEGRAM_BOT_TOKEN=...
+#   ADMIN_TELEGRAM_IDS=...
+#   POSTGRES_USER=mentoryab
+#   POSTGRES_PASSWORD=<strong-password>
+#   DATABASE_URL=postgresql://mentoryab:<password>@postgres:5432/mentoryab
+
+services:
+  bot:
+    image: ghcr.io/bahaar-ghafari/mentoryab-bot:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PORT: "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      - autoheal=true
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_DB: mentoryab
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d mentoryab"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  autoheal:
+    image: willfarrell/autoheal:latest
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  pgdata:

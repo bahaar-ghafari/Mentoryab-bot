@@ -42,9 +42,11 @@ model MentorProfile {
   title           String?
   skills          String[]
   experienceYears Int
+  country         String?
+  city            String?
   location        String?
   availability    Boolean  @default(true)
-  contactMethod   String?
+  contactMethods  String[] @default([])
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 }
@@ -57,7 +59,26 @@ model MenteeProfile {
   goals           String?
   skillsNeeded    String[]
   experienceYears Int?
+  country         String?
+  city            String?
   location        String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+}
+
+enum RequestStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
+
+model MentorshipRequest {
+  id              Int            @id @default(autoincrement())
+  mentorProfile   MentorProfile  @relation(fields: [mentorProfileId], references: [id])
+  mentorProfileId Int
+  menteeProfile   MenteeProfile  @relation(fields: [menteeProfileId], references: [id])
+  menteeProfileId Int
+  status          RequestStatus  @default(PENDING)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
 }
