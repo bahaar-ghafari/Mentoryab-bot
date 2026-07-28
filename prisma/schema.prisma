@@ -49,6 +49,7 @@ model MentorProfile {
   contactMethods  String[] @default([])
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+  mentorshipRequests MentorshipRequest[]
 }
 
 model MenteeProfile {
@@ -64,6 +65,7 @@ model MenteeProfile {
   location        String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+  mentorshipRequests MentorshipRequest[]
 }
 
 enum RequestStatus {

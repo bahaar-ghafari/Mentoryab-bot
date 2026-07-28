@@ -4,6 +4,12 @@ import TelegramBot, { type Message } from 'node-telegram-bot-api';
 import { PrismaClient } from '@prisma/client';
 import { findMentorMatches } from './matching.js';
 import { texts } from './i18n/en.js';
+import {
+  ContactType,
+  CONTACT_LABELS,
+  buildContactTypeKeyboard,
+  renderContactMethodsSummary,
+} from './contact.js';
 
 const ONBOARDING_STEPS = {
   mentor: ['name', 'title', 'skills', 'experience', 'country', 'city', 'contact'],
@@ -12,13 +18,6 @@ const ONBOARDING_STEPS = {
 
 type OnboardingStep = typeof ONBOARDING_STEPS['mentor'][number] | typeof ONBOARDING_STEPS['mentee'][number];
 type SubStep = 'year' | 'month';
-type ContactType = 'telegram' | 'phone' | 'email';
-
-const CONTACT_LABELS: Record<ContactType, string> = {
-  telegram: 'Telegram ID',
-  phone: 'Phone Number',
-  email: 'Email',
-};
 
 interface UserState {
   role: 'mentor' | 'mentee';
@@ -43,17 +42,6 @@ const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Se
 
 function format(text: string, values: Record<string, string | number> = {}) {
   return text.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ''));
-}
-
-function renderContactMethodsSummary(contactMethods?: Partial<Record<ContactType, string>>) {
-  if (!contactMethods || Object.keys(contactMethods).length === 0) return null;
-  return (Object.entries(contactMethods) as Array<[ContactType, string]>)
-    .map(([type, value]) => `${CONTACT_LABELS[type]}: ${value}`)
-    .join(', ');
-}
-
-function buildContactMethodsLabel(methods: string[]) {
-  return methods.length > 0 ? methods.join(', ') : null;
 }
 
 // ── Inline keyboard builders ──────────────────────────────────────────────────
@@ -141,23 +129,6 @@ function buildMonthKeyboard(year: string) {
     );
   }
   rows.push([{ text: '← Back to years', callback_data: 'back_to_years' }]);
-  return { inline_keyboard: rows };
-}
-
-function buildContactTypeKeyboard(collected: Partial<Record<ContactType, string>>, canGoBack: boolean) {
-  const all: ContactType[] = ['telegram', 'phone', 'email'];
-  const available = all.filter((t) => !collected[t]);
-  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
-  for (let i = 0; i < available.length; i += 2) {
-    rows.push(
-      available.slice(i, i + 2).map((t) => ({ text: CONTACT_LABELS[t], callback_data: `contact_type:${t}` }))
-    );
-  }
-  const navRow: Array<{ text: string; callback_data: string }> = [];
-  if (canGoBack) navRow.push({ text: '← Back', callback_data: 'back' });
-  const count = Object.keys(collected).length;
-  if (count > 0) navRow.push({ text: `Done ✅ (${count})`, callback_data: 'contact_done' });
-  if (navRow.length > 0) rows.push(navRow);
   return { inline_keyboard: rows };
 }
 
@@ -624,7 +595,10 @@ bot.on('callback_query', async (callbackQuery) => {
   if (data === 'contact_done') {
     if (!state || !chatId) return;
     const collected = state.contactMethods || {};
-    if (Object.keys(collected).length === 0) return;
+    if (Object.keys(collected).length === 0) {
+      await bot.sendMessage(chatId, 'Please add at least one contact method before continuing.');
+      return;
+    }
     state.stepIndex += 1;
     const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
     if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
@@ -828,7 +802,12 @@ bot.on('message', async (msg: Message) => {
         message_id: state.currentMessageId,
         reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0),
       });
-    } catch { /* ignore no-op edits */ }
+    } catch {
+      const sent = await bot.sendMessage(chatId, prompt, {
+        reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0),
+      });
+      state.currentMessageId = (sent as Message).message_id;
+    }
     return;
   }
 
@@ -847,6 +826,7 @@ bot.on('message', async (msg: Message) => {
     }
     return;
   }
+
   state.profile[currentStep] = text;
   state.stepIndex += 1;
 

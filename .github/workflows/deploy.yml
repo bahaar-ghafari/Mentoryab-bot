@@ -8,8 +8,33 @@ env:
   IMAGE: ghcr.io/bahaar-ghafari/mentoryab-bot
 
 jobs:
-  # ── 1. Build Docker image and push to GHCR ──────────────────────────────────
+  # ── 1. Install deps, typecheck, and run tests ────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/db
+
+      - name: Type-check
+        run: npm run build
+
+      - name: Run tests
+        run: npm test
+
+  # ── 2. Build Docker image and push to GHCR ──────────────────────────────────
   build:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -33,7 +58,7 @@ jobs:
 
   # ── 2. Pull new image on VPS and restart ─────────────────────────────────────
   deploy:
-    needs: build
+    needs: [test, build]
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to VPS
