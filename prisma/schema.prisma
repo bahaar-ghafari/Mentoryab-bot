@@ -48,6 +48,9 @@ model MentorProfile {
   location        String?
   availability    Boolean  @default(true)
   contactMethods  String[] @default([])
+  telegramContact String?  @unique
+  phoneContact    String?  @unique
+  emailContact    String?  @unique
   language        String   @default("en")
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt

@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 import express from 'express';
 import TelegramBot, { type Message } from 'node-telegram-bot-api';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 import { findMentorMatches } from './matching.js';
 import { getTexts, LOCALE_TEXTS, LANGUAGE_CHOICES, isLocale, type Locale, type Texts } from './i18n/index.js';
 import { translateOption, getContactLabels } from './i18n/labels.js';
@@ -57,6 +57,25 @@ function renderCollectedContacts(collected: Partial<Record<ContactType, string>>
 
 function languageDisplayName(code: string): string {
   return LANGUAGE_CHOICES.find((l) => l.code === code)?.label ?? code;
+}
+
+const CONTACT_FIELD_BY_TYPE: Record<ContactType, 'telegramContact' | 'phoneContact' | 'emailContact'> = {
+  telegram: 'telegramContact',
+  phone: 'phoneContact',
+  email: 'emailContact',
+};
+
+// Telegram ID/phone/email must be unique per mentor. Checked here (as the value is
+// typed) rather than only relying on the DB constraint, so a conflict is caught
+// immediately with a clear message instead of surfacing at finishOnboarding as a
+// generic error. Excludes the current user's own profile so re-onboarding with an
+// unchanged value isn't flagged as a conflict with themselves.
+async function isContactValueTaken(type: ContactType, value: string, currentTelegramId: string): Promise<boolean> {
+  const field = CONTACT_FIELD_BY_TYPE[type];
+  const existing = await prisma.mentorProfile.findFirst({
+    where: { [field]: value, user: { telegramId: { not: currentTelegramId } } },
+  });
+  return !!existing;
 }
 
 // ── Inline keyboard builders ──────────────────────────────────────────────────
@@ -313,45 +332,64 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
     : [];
 
   const role = state.role === 'mentor' ? 'MENTOR' : 'MENTEE';
-  const profileRelation = state.role === 'mentor'
-    ? {
-        mentorProfile: {
-          create: {
-            name: state.profile.name || 'Mentor',
-            title: state.profile.title || null,
-            skills: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
-            experienceYears,
-            country: state.profile.country || null,
-            city: state.profile.city || null,
-            location,
-            contactMethods,
-            language: state.language,
-          },
-        },
-      }
-    : {
-        menteeProfile: {
-          create: {
-            name: state.profile.name || 'Mentee',
-            goals: state.profile.goals || null,
-            skillsNeeded: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
-            experienceYears,
-            country: state.profile.country || null,
-            city: state.profile.city || null,
-            location,
-            language: state.language,
-          },
-        },
-      };
 
-  // Use upsert, not update: a user who taps "Become Mentor"/"Find Mentor" without
-  // ever sending /start first (e.g. from a stale keyboard after a bot restart) has
-  // no User row yet, and update() would throw P2025 and crash the whole process.
-  await prisma.user.upsert({
-    where: { telegramId },
-    update: { role, language: state.language, ...profileRelation },
-    create: { telegramId, role, language: state.language, ...profileRelation },
-  });
+  const mentorData = {
+    name: state.profile.name || 'Mentor',
+    title: state.profile.title || null,
+    skills: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
+    experienceYears,
+    country: state.profile.country || null,
+    city: state.profile.city || null,
+    location,
+    contactMethods,
+    telegramContact: state.contactMethods?.telegram || null,
+    phoneContact: state.contactMethods?.phone || null,
+    emailContact: state.contactMethods?.email || null,
+    language: state.language,
+  };
+
+  const menteeData = {
+    name: state.profile.name || 'Mentee',
+    goals: state.profile.goals || null,
+    skillsNeeded: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
+    experienceYears,
+    country: state.profile.country || null,
+    city: state.profile.city || null,
+    location,
+    language: state.language,
+  };
+
+  try {
+    await prisma.user.upsert({
+      where: { telegramId },
+      // A user re-running onboarding already has a MentorProfile/MenteeProfile
+      // (one-to-one relation) — nested `create` would throw P2014 and crash the
+      // whole process, so update uses nested `upsert` instead. Only a brand-new
+      // User row (the `create` branch below) can use a plain nested `create`.
+      update: {
+        role,
+        language: state.language,
+        ...(state.role === 'mentor'
+          ? { mentorProfile: { upsert: { create: mentorData, update: mentorData } } }
+          : { menteeProfile: { upsert: { create: menteeData, update: menteeData } } }),
+      },
+      // Use upsert, not update: a user who taps "Become Mentor"/"Find Mentor" without
+      // ever sending /start first (e.g. from a stale keyboard after a bot restart) has
+      // no User row yet, and update() would throw P2025 and crash the whole process.
+      create: {
+        telegramId,
+        role,
+        language: state.language,
+        ...(state.role === 'mentor' ? { mentorProfile: { create: mentorData } } : { menteeProfile: { create: menteeData } }),
+      },
+    });
+  } catch (err: unknown) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      await bot.sendMessage(chatId, t.messages.contactAlreadyTaken);
+      return;
+    }
+    throw err;
+  }
 
   userStates.delete(telegramId);
 
@@ -913,11 +951,15 @@ bot.on('message', async (msg: Message) => {
       await bot.sendMessage(chatId, t.messages.invalidEmail);
       return;
     }
+    const labels = getContactLabels(state.language);
+    if (await isContactValueTaken(state.awaitingContactType, text, telegramId)) {
+      await bot.sendMessage(chatId, format(t.messages.contactTaken, { contactType: labels[state.awaitingContactType] }));
+      return;
+    }
     if (!state.contactMethods) state.contactMethods = {};
     state.contactMethods[state.awaitingContactType] = text;
     state.awaitingContactType = undefined;
     const collected = state.contactMethods;
-    const labels = getContactLabels(state.language);
     const all: ContactType[] = ['telegram', 'phone', 'email'];
     const remaining = all.filter((ct) => !collected[ct]);
     const collectedStr = renderCollectedContacts(collected, labels);

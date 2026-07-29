@@ -71,6 +71,8 @@ export const texts = {
     allContactMethodsAdded: '✅ All contact methods added!',
     notAvailable: 'N/A',
     requestButtonPrefix: '📩 Request',
+    contactTaken: 'That {contactType} is already registered by another mentor. Please use a different one.',
+    contactAlreadyTaken: 'One of your contact details is already registered by another mentor. Please review your Telegram ID, phone, or email and try again.',
   },
   summary: {
     name: '👤 Name',

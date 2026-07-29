@@ -71,6 +71,8 @@ export const texts = {
     allContactMethodsAdded: '✅ همه روش‌های تماس اضافه شدند!',
     notAvailable: 'نامشخص',
     requestButtonPrefix: '📩 درخواست',
+    contactTaken: 'این {contactType} قبلاً توسط منتور دیگری ثبت شده است. لطفاً مورد دیگری وارد کنید.',
+    contactAlreadyTaken: 'یکی از اطلاعات تماس شما قبلاً توسط منتور دیگری ثبت شده است. لطفاً آیدی تلگرام، شماره تلفن یا ایمیل خود را بررسی و دوباره تلاش کنید.',
   },
   summary: {
     name: '👤 نام',
