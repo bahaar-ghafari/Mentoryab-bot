@@ -428,7 +428,19 @@ const handleMatchRequest = async (msg: Message) => {
     mentors.map((m) => ({ id: m.id, name: m.name, skills: m.skills, experienceYears: m.experienceYears, location: m.location, availability: m.availability }))
   );
 
-  if (!matches.length) { await bot.sendMessage(chatId, texts.messages.noMentorsAvailable); return; }
+  if (!matches.length) {
+    await bot.sendMessage(chatId, texts.messages.noMentorsAvailable);
+    const notification = format(texts.messages.manualMatchNeeded, {
+      menteeName: user.menteeProfile.name,
+      skills: user.menteeProfile.skillsNeeded.join(', ') || 'N/A',
+      experience: user.menteeProfile.experienceYears ?? 0,
+      location: user.menteeProfile.location || 'N/A',
+    });
+    for (const adminId of adminIds) {
+      await bot.sendMessage(Number(adminId), notification).catch(() => {});
+    }
+    return;
+  }
 
   const topMatches = matches.slice(0, 3);
   let reply = texts.messages.topMentorMatches + '\n';
