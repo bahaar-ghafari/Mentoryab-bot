@@ -82,11 +82,27 @@ enum RequestStatus {
 
 model MentorshipRequest {
   id              Int            @id @default(autoincrement())
-  mentorProfile   MentorProfile  @relation(fields: [mentorProfileId], references: [id])
+  mentorProfile   MentorProfile  @relation(fields: [mentorProfileId], references: [id], onDelete: Cascade)
   mentorProfileId Int
-  menteeProfile   MenteeProfile  @relation(fields: [menteeProfileId], references: [id])
+  menteeProfile   MenteeProfile  @relation(fields: [menteeProfileId], references: [id], onDelete: Cascade)
   menteeProfileId Int
   status          RequestStatus  @default(PENDING)
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+}
+
+model ProfileAuditLog {
+  id         Int         @id @default(autoincrement())
+  telegramId String
+  role       Role
+  action     AuditAction
+  actor      String
+  snapshot   Json
+  createdAt  DateTime    @default(now())
 }

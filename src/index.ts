@@ -78,6 +78,21 @@ async function isContactValueTaken(type: ContactType, value: string, currentTele
   return !!existing;
 }
 
+// Records every profile create/update/delete for the admin /history command.
+// `actor` is the acting telegramId for self-edits, or the literal string 'admin'
+// for admin-initiated edits/deletes, so history can distinguish the two.
+async function logProfileAudit(
+  telegramId: string,
+  role: 'MENTOR' | 'MENTEE',
+  action: 'CREATE' | 'UPDATE' | 'DELETE',
+  actor: string,
+  snapshot: unknown
+) {
+  await prisma.profileAuditLog.create({
+    data: { telegramId, role, action, actor, snapshot: snapshot as Prisma.InputJsonValue },
+  });
+}
+
 // ── Inline keyboard builders ──────────────────────────────────────────────────
 
 async function getSkillOptions(): Promise<string[]> {
@@ -188,11 +203,14 @@ function buildLanguageInlineKeyboard() {
   return { inline_keyboard: [LANGUAGE_CHOICES.map((l) => ({ text: l.label, callback_data: `language:${l.code}` }))] };
 }
 
-function buildMainMenuKeyboard(isMentor: boolean, isAdmin: boolean, t: Texts) {
+function buildMainMenuKeyboard(isMentor: boolean, hasProfile: boolean, isAdmin: boolean, t: Texts) {
   const keyboard: Array<Array<{ text: string }>> = [];
   keyboard.push([{ text: t.startMenu.joinMentors }, { text: t.startMenu.needMentor }]);
   if (isMentor) {
     keyboard.push([{ text: t.startMenu.busy }, { text: t.startMenu.available }]);
+  }
+  if (hasProfile) {
+    keyboard.push([{ text: t.startMenu.editProfile }]);
   }
   if (isAdmin) {
     keyboard.push([{ text: t.startMenu.adminMentors }, { text: t.startMenu.adminMentees }]);
@@ -333,6 +351,12 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
 
   const role = state.role === 'mentor' ? 'MENTOR' : 'MENTEE';
 
+  const existingUser = await prisma.user.findUnique({
+    where: { telegramId },
+    include: { mentorProfile: true, menteeProfile: true },
+  });
+  const hadProfileBefore = state.role === 'mentor' ? !!existingUser?.mentorProfile : !!existingUser?.menteeProfile;
+
   const mentorData = {
     name: state.profile.name || 'Mentor',
     title: state.profile.title || null,
@@ -391,6 +415,14 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
     throw err;
   }
 
+  await logProfileAudit(
+    telegramId,
+    role,
+    hadProfileBefore ? 'UPDATE' : 'CREATE',
+    telegramId,
+    state.role === 'mentor' ? mentorData : menteeData
+  );
+
   userStates.delete(telegramId);
 
   // Translated display versions for the summary shown to the user — the DB above
@@ -439,7 +471,7 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
   }
 
   await bot.sendMessage(chatId, t.chooseRole, {
-    reply_markup: buildMainMenuKeyboard(isMentorNow, adminIds.has(telegramId), t),
+    reply_markup: buildMainMenuKeyboard(isMentorNow, true, adminIds.has(telegramId), t),
   });
 }
 
@@ -468,6 +500,161 @@ bot.onText(/^\/language$/, async (msg: Message) => {
   });
 });
 
+bot.onText(/^\/history$/, async (msg: Message) => {
+  const telegramId = String(msg.from?.id);
+  if (!adminIds.has(telegramId)) return;
+  const admin = await prisma.user.findUnique({ where: { telegramId } });
+  const t = getTexts(admin?.language);
+
+  const entries = await prisma.profileAuditLog.findMany({ orderBy: { createdAt: 'desc' }, take: 20 });
+  if (!entries.length) { await bot.sendMessage(msg.chat.id, t.admin.noHistory); return; }
+
+  const actionLabel = (action: string) =>
+    action === 'CREATE' ? t.admin.actionCreate : action === 'UPDATE' ? t.admin.actionUpdate : t.admin.actionDelete;
+
+  const lines = entries.map((entry, i) => {
+    const snapshot = entry.snapshot as Record<string, unknown>;
+    const detail = typeof snapshot.name === 'string'
+      ? snapshot.name
+      : typeof snapshot.field === 'string'
+        ? `${snapshot.field}: ${JSON.stringify(snapshot.oldValue)} → ${JSON.stringify(snapshot.newValue)}`
+        : '';
+    const actorNote = entry.actor === 'admin' ? ` ${t.admin.byAdmin}` : '';
+    return `${i + 1}. ${actionLabel(entry.action)} — ${entry.role} ${entry.telegramId}${detail ? ` — ${detail}` : ''}${actorNote}\n   ${entry.createdAt.toISOString()}`;
+  });
+
+  await bot.sendMessage(msg.chat.id, `${format(t.admin.historyHeader, { count: entries.length })}\n\n${lines.join('\n\n')}`);
+});
+
+bot.onText(/^\/deletementor\s+(\d+)\s*$/, async (msg: Message, match: RegExpMatchArray | null) => {
+  const telegramId = String(msg.from?.id);
+  if (!adminIds.has(telegramId)) return;
+  const admin = await prisma.user.findUnique({ where: { telegramId } });
+  const t = getTexts(admin?.language);
+  const id = Number(match?.[1]);
+
+  const profile = await prisma.mentorProfile.findUnique({ where: { id }, include: { user: true } });
+  if (!profile) { await bot.sendMessage(msg.chat.id, t.admin.profileNotFound); return; }
+
+  await logProfileAudit(profile.user.telegramId, 'MENTOR', 'DELETE', 'admin', profile);
+  await prisma.mentorProfile.delete({ where: { id } });
+  await bot.sendMessage(msg.chat.id, format(t.admin.mentorDeleted, { id }));
+});
+
+bot.onText(/^\/deletementee\s+(\d+)\s*$/, async (msg: Message, match: RegExpMatchArray | null) => {
+  const telegramId = String(msg.from?.id);
+  if (!adminIds.has(telegramId)) return;
+  const admin = await prisma.user.findUnique({ where: { telegramId } });
+  const t = getTexts(admin?.language);
+  const id = Number(match?.[1]);
+
+  const profile = await prisma.menteeProfile.findUnique({ where: { id }, include: { user: true } });
+  if (!profile) { await bot.sendMessage(msg.chat.id, t.admin.profileNotFound); return; }
+
+  await logProfileAudit(profile.user.telegramId, 'MENTEE', 'DELETE', 'admin', profile);
+  await prisma.menteeProfile.delete({ where: { id } });
+  await bot.sendMessage(msg.chat.id, format(t.admin.menteeDeleted, { id }));
+});
+
+bot.onText(/^\/deletementor\s*$/, async (msg: Message) => {
+  const telegramId = String(msg.from?.id);
+  if (!adminIds.has(telegramId)) return;
+  const admin = await prisma.user.findUnique({ where: { telegramId } });
+  await bot.sendMessage(msg.chat.id, getTexts(admin?.language).admin.deleteMentorUsage);
+});
+
+bot.onText(/^\/deletementee\s*$/, async (msg: Message) => {
+  const telegramId = String(msg.from?.id);
+  if (!adminIds.has(telegramId)) return;
+  const admin = await prisma.user.findUnique({ where: { telegramId } });
+  await bot.sendMessage(msg.chat.id, getTexts(admin?.language).admin.deleteMenteeUsage);
+});
+
+const MENTOR_EDITABLE_FIELDS = ['name', 'title', 'skills', 'experienceYears', 'country', 'city', 'availability', 'telegramContact', 'phoneContact', 'emailContact'] as const;
+const MENTEE_EDITABLE_FIELDS = ['name', 'goals', 'skillsNeeded', 'experienceYears', 'country', 'city'] as const;
+
+bot.onText(/^\/editmentor(?:\s+([\s\S]+))?$/, async (msg: Message, match: RegExpMatchArray | null) => {
+  const telegramId = String(msg.from?.id);
+  if (!adminIds.has(telegramId)) return;
+  const chatId = msg.chat.id;
+  const admin = await prisma.user.findUnique({ where: { telegramId } });
+  const t = getTexts(admin?.language);
+
+  const args = match?.[1]?.match(/^(\d+)\s+(\S+)\s+([\s\S]+)$/);
+  if (!args) { await bot.sendMessage(chatId, t.admin.editMentorUsage); return; }
+  const [, idStr, field, rawValue] = args;
+  const id = Number(idStr);
+
+  if (!(MENTOR_EDITABLE_FIELDS as readonly string[]).includes(field)) {
+    await bot.sendMessage(chatId, format(t.admin.unknownField, { field }));
+    return;
+  }
+
+  const profile = await prisma.mentorProfile.findUnique({ where: { id }, include: { user: true } });
+  if (!profile) { await bot.sendMessage(chatId, t.admin.profileNotFound); return; }
+
+  let value: string | number | boolean | string[];
+  if (field === 'experienceYears') {
+    const n = Number(rawValue);
+    if (!Number.isFinite(n) || n < 0) { await bot.sendMessage(chatId, format(t.admin.invalidFieldValue, { field })); return; }
+    value = n;
+  } else if (field === 'availability') {
+    if (!['true', 'false'].includes(rawValue.toLowerCase())) { await bot.sendMessage(chatId, format(t.admin.invalidFieldValue, { field })); return; }
+    value = rawValue.toLowerCase() === 'true';
+  } else if (field === 'skills') {
+    value = rawValue.split(',').map((s) => s.trim()).filter(Boolean);
+  } else if (field === 'telegramContact' || field === 'phoneContact' || field === 'emailContact') {
+    if (field === 'emailContact' && !isValidEmail(rawValue)) { await bot.sendMessage(chatId, t.messages.invalidEmail); return; }
+    const taken = await prisma.mentorProfile.findFirst({ where: { [field]: rawValue, id: { not: id } } });
+    if (taken) { await bot.sendMessage(chatId, t.admin.contactFieldTaken); return; }
+    value = rawValue;
+  } else {
+    value = rawValue;
+  }
+
+  const oldValue = (profile as unknown as Record<string, unknown>)[field];
+  await prisma.mentorProfile.update({ where: { id }, data: { [field]: value } });
+  await logProfileAudit(profile.user.telegramId, 'MENTOR', 'UPDATE', 'admin', { field, oldValue, newValue: value });
+  await bot.sendMessage(chatId, format(t.admin.fieldUpdated, { field, id }));
+});
+
+bot.onText(/^\/editmentee(?:\s+([\s\S]+))?$/, async (msg: Message, match: RegExpMatchArray | null) => {
+  const telegramId = String(msg.from?.id);
+  if (!adminIds.has(telegramId)) return;
+  const chatId = msg.chat.id;
+  const admin = await prisma.user.findUnique({ where: { telegramId } });
+  const t = getTexts(admin?.language);
+
+  const args = match?.[1]?.match(/^(\d+)\s+(\S+)\s+([\s\S]+)$/);
+  if (!args) { await bot.sendMessage(chatId, t.admin.editMenteeUsage); return; }
+  const [, idStr, field, rawValue] = args;
+  const id = Number(idStr);
+
+  if (!(MENTEE_EDITABLE_FIELDS as readonly string[]).includes(field)) {
+    await bot.sendMessage(chatId, format(t.admin.unknownField, { field }));
+    return;
+  }
+
+  const profile = await prisma.menteeProfile.findUnique({ where: { id }, include: { user: true } });
+  if (!profile) { await bot.sendMessage(chatId, t.admin.profileNotFound); return; }
+
+  let value: string | number | string[];
+  if (field === 'experienceYears') {
+    const n = Number(rawValue);
+    if (!Number.isFinite(n) || n < 0) { await bot.sendMessage(chatId, format(t.admin.invalidFieldValue, { field })); return; }
+    value = n;
+  } else if (field === 'skillsNeeded') {
+    value = rawValue.split(',').map((s) => s.trim()).filter(Boolean);
+  } else {
+    value = rawValue;
+  }
+
+  const oldValue = (profile as unknown as Record<string, unknown>)[field];
+  await prisma.menteeProfile.update({ where: { id }, data: { [field]: value } });
+  await logProfileAudit(profile.user.telegramId, 'MENTEE', 'UPDATE', 'admin', { field, oldValue, newValue: value });
+  await bot.sendMessage(chatId, format(t.admin.fieldUpdated, { field, id }));
+});
+
 bot.onText(/\/start/, async (msg: Message) => {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
@@ -478,10 +665,10 @@ bot.onText(/\/start/, async (msg: Message) => {
     create: { telegramId, firstName: msg.from?.first_name || null, lastName: msg.from?.last_name || null, username: msg.from?.username || null },
   });
 
-  const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
   const t = getTexts(user?.language);
   await bot.sendMessage(chatId, `${t.welcome}\n\n${t.chooseRole}`, {
-    reply_markup: buildMainMenuKeyboard(Boolean(user?.mentorProfile), adminIds.has(telegramId), t),
+    reply_markup: buildMainMenuKeyboard(Boolean(user?.mentorProfile), Boolean(user?.mentorProfile || user?.menteeProfile), adminIds.has(telegramId), t),
   });
 });
 
@@ -571,6 +758,17 @@ const handleHelp = async (msg: Message) => {
   const user = await prisma.user.findUnique({ where: { telegramId } });
   const t = getTexts(user?.language);
   await bot.sendMessage(msg.chat.id, t.messages.helpText);
+};
+
+// Re-runs the same onboarding flow the user already completed — finishOnboarding
+// now upserts the existing profile rather than crashing, so this doubles as "edit".
+const handleEditProfile = async (msg: Message) => {
+  const telegramId = String(msg.from?.id);
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
+  if (user?.mentorProfile) { await startMentorOnboarding(msg); return; }
+  if (user?.menteeProfile) { await startMenteeOnboarding(msg); return; }
+  const t = getTexts(user?.language);
+  await bot.sendMessage(msg.chat.id, t.messages.noProfileYet);
 };
 
 const handleAdminMentorsList = async (msg: Message) => {
@@ -931,6 +1129,7 @@ bot.on('message', async (msg: Message) => {
   if (!state) {
     if (matchesMenuButton(text, 'busy')) { await handleSetBusy(msg); return; }
     if (matchesMenuButton(text, 'available')) { await handleSetAvailable(msg); return; }
+    if (matchesMenuButton(text, 'editProfile')) { await handleEditProfile(msg); return; }
     if (matchesMenuButton(text, 'help')) { await handleHelp(msg); return; }
     if (matchesMenuButton(text, 'adminMentors')) { await handleAdminMentorsList(msg); return; }
     if (matchesMenuButton(text, 'adminMentees')) { await handleAdminMenteesList(msg); return; }
