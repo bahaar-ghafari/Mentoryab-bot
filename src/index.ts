@@ -9,6 +9,7 @@ import {
   CONTACT_LABELS,
   buildContactTypeKeyboard,
   renderContactMethodsSummary,
+  isValidEmail,
 } from './contact.js';
 
 const ONBOARDING_STEPS = {
@@ -273,39 +274,43 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
         .map(([type, value]) => `${CONTACT_LABELS[type]}: ${value}`)
     : [];
 
-  await prisma.user.update({
+  const role = state.role === 'mentor' ? 'MENTOR' : 'MENTEE';
+  const profileRelation = state.role === 'mentor'
+    ? {
+        mentorProfile: {
+          create: {
+            name: state.profile.name || 'Mentor',
+            title: state.profile.title || null,
+            skills: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
+            experienceYears,
+            country: state.profile.country || null,
+            city: state.profile.city || null,
+            location,
+            contactMethods,
+          },
+        },
+      }
+    : {
+        menteeProfile: {
+          create: {
+            name: state.profile.name || 'Mentee',
+            goals: state.profile.goals || null,
+            skillsNeeded: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
+            experienceYears,
+            country: state.profile.country || null,
+            city: state.profile.city || null,
+            location,
+          },
+        },
+      };
+
+  // Use upsert, not update: a user who taps "Become Mentor"/"Find Mentor" without
+  // ever sending /start first (e.g. from a stale keyboard after a bot restart) has
+  // no User row yet, and update() would throw P2025 and crash the whole process.
+  await prisma.user.upsert({
     where: { telegramId },
-    data: {
-      role: state.role === 'mentor' ? 'MENTOR' : 'MENTEE',
-      ...(state.role === 'mentor'
-        ? {
-            mentorProfile: {
-              create: {
-                name: state.profile.name || 'Mentor',
-                title: state.profile.title || null,
-                skills: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
-                experienceYears,
-                country: state.profile.country || null,
-                city: state.profile.city || null,
-                location,
-                contactMethods,
-              },
-            },
-          }
-        : {
-            menteeProfile: {
-              create: {
-                name: state.profile.name || 'Mentee',
-                goals: state.profile.goals || null,
-                skillsNeeded: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
-                experienceYears,
-                country: state.profile.country || null,
-                city: state.profile.city || null,
-                location,
-              },
-            },
-          }),
-    },
+    update: { role, ...profileRelation },
+    create: { telegramId, role, ...profileRelation },
   });
 
   userStates.delete(telegramId);
@@ -782,6 +787,10 @@ bot.on('message', async (msg: Message) => {
     if (!state.awaitingContactType) {
       // No type chosen yet — nudge to use buttons
       await bot.sendMessage(chatId, texts.messages.useButtons);
+      return;
+    }
+    if (state.awaitingContactType === 'email' && !isValidEmail(text)) {
+      await bot.sendMessage(chatId, texts.messages.invalidEmail);
       return;
     }
     if (!state.contactMethods) state.contactMethods = {};

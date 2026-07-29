@@ -32,6 +32,7 @@ export const texts = {
   },
   messages: {
     useButtons: 'Please use the buttons to make your selection.',
+    invalidEmail: 'That doesn\'t look like a valid email address. Please enter one like name@example.com.',
     completeMenteeProfile: 'Please complete your mentee profile first by tapping Find Mentor.',
     noMentorsAvailable: 'No mentors are available right now.',
     requestSent: 'Your request has been sent to {mentorName}.',
