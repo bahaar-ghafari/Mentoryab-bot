@@ -11,7 +11,7 @@ describe('translateOption', () => {
   it('translates known canonical values to Farsi', () => {
     expect(translateOption('fa', 'Design', 'skill')).toBe('طراحی');
     expect(translateOption('fa', 'Iran', 'country')).toBe('ایران');
-    expect(translateOption('fa', 'Frontend Engineer', 'title')).toBe('مهندس فرانت‌اند');
+    expect(translateOption('fa', 'Mobile Engineer', 'title')).toBe('مهندس موبایل');
   });
 
   it('falls back to the canonical value for unmapped/custom entries', () => {

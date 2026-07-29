@@ -21,13 +21,13 @@ const SKILL_LABELS_FA: Record<string, string> = {
 };
 
 const TITLE_LABELS_FA: Record<string, string> = {
-  'Frontend Engineer': 'مهندس فرانت‌اند',
-  'Backend Engineer': 'مهندس بک‌اند',
-  'Full Stack Engineer': 'مهندس فول‌استک',
+  'Frontend Engineer': ' فرانت‌اند',
+  'Backend Engineer': ' بک‌اند',
+  'Full Stack Engineer': ' فول‌استک',
   'Mobile Engineer': 'مهندس موبایل',
   'Data Scientist': 'دیتاساینتیست',
-  'ML Engineer': 'مهندس یادگیری ماشین',
-  'DevOps Engineer': 'مهندس DevOps',
+  'ML Engineer': ' یادگیری ماشین',
+  'DevOps Engineer': ' DevOps',
   'Product Manager': 'مدیر محصول',
   'UX/UI Designer': 'طراح UX/UI',
   'Engineering Manager': 'مدیر مهندسی',
