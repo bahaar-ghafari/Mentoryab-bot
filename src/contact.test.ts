@@ -30,6 +30,23 @@ describe('contact helpers', () => {
       'Done ✅ (2)',
     ]);
   });
+
+  it('accepts custom labels and ui strings for a translated keyboard', () => {
+    const faLabels = { telegram: 'آیدی تلگرام', phone: 'شماره تلفن', email: 'ایمیل' };
+    const keyboard = buildContactTypeKeyboard({}, true, faLabels, { back: '← بازگشت', done: 'انجام شد' });
+    expect(keyboard.inline_keyboard.flat().map((button) => button.text)).toEqual([
+      'آیدی تلگرام',
+      'شماره تلفن',
+      'ایمیل',
+      '← بازگشت',
+    ]);
+  });
+
+  it('renders the summary using custom labels when provided', () => {
+    const faLabels = { telegram: 'آیدی تلگرام', phone: 'شماره تلفن', email: 'ایمیل' };
+    const summary = renderContactMethodsSummary({ telegram: '@user' }, faLabels);
+    expect(summary).toBe('آیدی تلگرام: @user');
+  });
 });
 
 describe('isValidEmail', () => {

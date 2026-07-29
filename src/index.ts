@@ -3,7 +3,9 @@ import express from 'express';
 import TelegramBot, { type Message } from 'node-telegram-bot-api';
 import { PrismaClient } from '@prisma/client';
 import { findMentorMatches } from './matching.js';
-import { texts } from './i18n/en.js';
+import { getTexts, LOCALE_TEXTS, LANGUAGE_CHOICES, isLocale, type Locale, type Texts } from './i18n/index.js';
+import { translateOption, getContactLabels } from './i18n/labels.js';
+import { SKILL_OPTIONS } from './i18n/options.js';
 import {
   ContactType,
   CONTACT_LABELS,
@@ -13,8 +15,8 @@ import {
 } from './contact.js';
 
 const ONBOARDING_STEPS = {
-  mentor: ['name', 'title', 'skills', 'experience', 'country', 'city', 'contact'],
-  mentee: ['name', 'goals', 'skills', 'experience', 'country', 'city'],
+  mentor: ['language', 'name', 'title', 'skills', 'experience', 'country', 'city', 'contact'],
+  mentee: ['language', 'name', 'goals', 'skills', 'experience', 'country', 'city'],
 } as const;
 
 type OnboardingStep = typeof ONBOARDING_STEPS['mentor'][number] | typeof ONBOARDING_STEPS['mentee'][number];
@@ -29,6 +31,7 @@ interface UserState {
   selectedSkills: string[];
   contactMethods?: Partial<Record<ContactType, string>>;
   awaitingContactType?: ContactType;
+  language: Locale;
 }
 
 dotenv.config();
@@ -45,12 +48,31 @@ function format(text: string, values: Record<string, string | number> = {}) {
   return text.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ''));
 }
 
+// A reply-keyboard button's label depends on the tapping user's language, which we
+// don't know until we recognize the button — so match against every locale's label
+// rather than requiring a DB lookup just to interpret which button was pressed.
+function matchesMenuButton(text: string, key: keyof Texts['startMenu']): boolean {
+  return Object.values(LOCALE_TEXTS).some((loc) => loc.startMenu[key] === text);
+}
+
+function menuButtonRegex(key: keyof Texts['startMenu']): RegExp {
+  const variants = Object.values(LOCALE_TEXTS).map((loc) => loc.startMenu[key]);
+  const escaped = variants.map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  return new RegExp(`^(${escaped.join('|')})$`, 'i');
+}
+
+function renderCollectedContacts(collected: Partial<Record<ContactType, string>>, labels: Record<ContactType, string>): string {
+  return (Object.keys(collected) as ContactType[])
+    .map((ct) => `✅ ${labels[ct]}: ${collected[ct]}`)
+    .join('\n');
+}
+
 // ── Inline keyboard builders ──────────────────────────────────────────────────
 
 async function getSkillOptions(): Promise<string[]> {
   const mentors = await prisma.mentorProfile.findMany({ select: { skills: true } });
   const mentorSkills = [...new Set(mentors.flatMap((m) => m.skills))];
-  const base = texts.skillOptions.filter((s) => s !== 'Other');
+  const base = SKILL_OPTIONS.filter((s) => s !== 'Other');
   const combined = [...base];
   for (const s of mentorSkills) {
     if (!combined.some((o) => o.toLowerCase() === s.toLowerCase())) {
@@ -60,20 +82,23 @@ async function getSkillOptions(): Promise<string[]> {
   return combined;
 }
 
-function buildSkillsInlineKeyboard(options: string[], selected: string[], canGoBack: boolean) {
+function buildSkillsInlineKeyboard(options: string[], selected: string[], canGoBack: boolean, t: Texts) {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
 
-  // Predefined options
+  // Predefined options — canonical value stays in callback_data, label is translated
   for (let i = 0; i < options.length; i += 2) {
     rows.push(
-      options.slice(i, i + 2).map((skill) => ({
-        text: selected.includes(skill) ? `✅ ${skill}` : skill,
-        callback_data: `toggle_skill:${skill}`,
-      }))
+      options.slice(i, i + 2).map((skill) => {
+        const label = translateOption(t.locale, skill, 'skill');
+        return {
+          text: selected.includes(skill) ? `✅ ${label}` : label,
+          callback_data: `toggle_skill:${skill}`,
+        };
+      })
     );
   }
 
-  // Custom typed skills not in predefined list — always shown as selected ✅
+  // Custom typed skills not in predefined list — always shown as selected ✅, untranslated
   const custom = selected.filter((s) => !options.some((o) => o.toLowerCase() === s.toLowerCase()));
   for (let i = 0; i < custom.length; i += 2) {
     rows.push(
@@ -85,9 +110,9 @@ function buildSkillsInlineKeyboard(options: string[], selected: string[], canGoB
   }
 
   const actionRow: Array<{ text: string; callback_data: string }> = [];
-  if (canGoBack) actionRow.push({ text: '← Back', callback_data: 'back' });
+  if (canGoBack) actionRow.push({ text: t.ui.back, callback_data: 'back' });
   actionRow.push({
-    text: selected.length > 0 ? `Done ✅ (${selected.length})` : 'Done',
+    text: selected.length > 0 ? `${t.ui.done} ✅ (${selected.length})` : t.ui.done,
     callback_data: 'skill_done',
   });
   rows.push(actionRow);
@@ -95,19 +120,19 @@ function buildSkillsInlineKeyboard(options: string[], selected: string[], canGoB
   return { inline_keyboard: rows };
 }
 
-function buildTitleInlineKeyboard(canGoBack: boolean) {
+function buildTitleInlineKeyboard(canGoBack: boolean, t: Texts) {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
-  const options = texts.titleOptions;
+  const options = t.titleOptions;
   for (let i = 0; i < options.length; i += 2) {
     rows.push(
-      options.slice(i, i + 2).map((t) => ({ text: t, callback_data: `title:${t}` }))
+      options.slice(i, i + 2).map((opt) => ({ text: translateOption(t.locale, opt, 'title'), callback_data: `title:${opt}` }))
     );
   }
-  if (canGoBack) rows.push([{ text: '← Back', callback_data: 'back' }]);
+  if (canGoBack) rows.push([{ text: t.ui.back, callback_data: 'back' }]);
   return { inline_keyboard: rows };
 }
 
-function buildYearKeyboard(canGoBack: boolean) {
+function buildYearKeyboard(canGoBack: boolean, t: Texts) {
   const currentYear = new Date().getFullYear();
   const years: string[] = [];
   for (let y = 1990; y <= currentYear; y++) years.push(String(y));
@@ -115,11 +140,11 @@ function buildYearKeyboard(canGoBack: boolean) {
   for (let i = 0; i < years.length; i += 5) {
     rows.push(years.slice(i, i + 5).map((y) => ({ text: y, callback_data: `startyear:${y}` })));
   }
-  if (canGoBack) rows.push([{ text: '← Back', callback_data: 'back' }]);
+  if (canGoBack) rows.push([{ text: t.ui.back, callback_data: 'back' }]);
   return { inline_keyboard: rows };
 }
 
-function buildMonthKeyboard(year: string) {
+function buildMonthKeyboard(year: string, t: Texts) {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
   for (let i = 0; i < 12; i += 4) {
     rows.push(
@@ -129,36 +154,40 @@ function buildMonthKeyboard(year: string) {
       }))
     );
   }
-  rows.push([{ text: '← Back to years', callback_data: 'back_to_years' }]);
+  rows.push([{ text: t.ui.backToYears, callback_data: 'back_to_years' }]);
   return { inline_keyboard: rows };
 }
 
-function buildCountryInlineKeyboard(canGoBack: boolean) {
-  const options = texts.countryOptions.filter((c) => c !== 'Other');
+function buildCountryInlineKeyboard(canGoBack: boolean, t: Texts) {
+  const options = t.countryOptions.filter((c) => c !== 'Other');
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
   for (let i = 0; i < options.length; i += 2) {
     rows.push(
-      options.slice(i, i + 2).map((c) => ({ text: c, callback_data: `country:${c}` }))
+      options.slice(i, i + 2).map((c) => ({ text: translateOption(t.locale, c, 'country'), callback_data: `country:${c}` }))
     );
   }
   const navRow: Array<{ text: string; callback_data: string }> = [];
-  if (canGoBack) navRow.push({ text: '← Back', callback_data: 'back' });
-  navRow.push({ text: 'Skip', callback_data: 'skip' });
+  if (canGoBack) navRow.push({ text: t.ui.back, callback_data: 'back' });
+  navRow.push({ text: t.ui.skip, callback_data: 'skip' });
   rows.push(navRow);
   return { inline_keyboard: rows };
 }
 
-function buildMainMenuKeyboard(isMentor = false, isAdmin = false) {
+function buildLanguageInlineKeyboard() {
+  return { inline_keyboard: [LANGUAGE_CHOICES.map((l) => ({ text: l.label, callback_data: `language:${l.code}` }))] };
+}
+
+function buildMainMenuKeyboard(isMentor: boolean, isAdmin: boolean, t: Texts) {
   const keyboard: Array<Array<{ text: string }>> = [];
-  keyboard.push([{ text: texts.startMenu.joinMentors }, { text: texts.startMenu.needMentor }]);
+  keyboard.push([{ text: t.startMenu.joinMentors }, { text: t.startMenu.needMentor }]);
   if (isMentor) {
-    keyboard.push([{ text: texts.startMenu.busy }, { text: texts.startMenu.available }]);
+    keyboard.push([{ text: t.startMenu.busy }, { text: t.startMenu.available }]);
   }
   if (isAdmin) {
-    keyboard.push([{ text: texts.startMenu.adminMentors }, { text: texts.startMenu.adminMentees }]);
-    keyboard.push([{ text: texts.startMenu.adminRestart }]);
+    keyboard.push([{ text: t.startMenu.adminMentors }, { text: t.startMenu.adminMentees }]);
+    keyboard.push([{ text: t.startMenu.adminRestart }]);
   }
-  keyboard.push([{ text: texts.startMenu.help }]);
+  keyboard.push([{ text: t.startMenu.help }]);
   return { keyboard, resize_keyboard: true };
 }
 
@@ -175,60 +204,71 @@ async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee',
   const state = userStates.get(telegramId);
   if (!state) return;
 
+  const t = getTexts(state.language);
   const canGoBack = state.stepIndex > 0;
-  const backBtn = { text: '← Back', callback_data: 'back' };
+  const backBtn = { text: t.ui.back, callback_data: 'back' };
 
   let text: string;
   let reply_markup: object;
 
   switch (step) {
+    case 'language':
+      // Shown before we know the user's preference, so greet in both languages.
+      text = `${LOCALE_TEXTS.en.prompts.language}\n${LOCALE_TEXTS.fa.prompts.language}`;
+      reply_markup = buildLanguageInlineKeyboard();
+      break;
+
+    case 'name':
+      text = role === 'mentor' ? t.mentorStart : t.menteeStart;
+      reply_markup = canGoBack ? { inline_keyboard: [[backBtn]] } : { inline_keyboard: [] as unknown[] };
+      break;
+
     case 'title':
-      text = texts.prompts.title;
-      reply_markup = buildTitleInlineKeyboard(canGoBack);
+      text = t.prompts.title;
+      reply_markup = buildTitleInlineKeyboard(canGoBack, t);
       break;
 
     case 'skills': {
       const skillOptions = await getSkillOptions();
-      text = role === 'mentor' ? texts.prompts.skillsMentor : texts.prompts.skillsMentee;
-      reply_markup = buildSkillsInlineKeyboard(skillOptions, state.selectedSkills, canGoBack);
+      text = role === 'mentor' ? t.prompts.skillsMentor : t.prompts.skillsMentee;
+      reply_markup = buildSkillsInlineKeyboard(skillOptions, state.selectedSkills, canGoBack, t);
       break;
     }
 
     case 'experience':
       state.awaitingSubStep = 'year';
-      text = texts.prompts.experience;
-      reply_markup = buildYearKeyboard(canGoBack);
+      text = t.prompts.experience;
+      reply_markup = buildYearKeyboard(canGoBack, t);
       break;
 
     case 'country':
-      text = texts.prompts.country;
-      reply_markup = buildCountryInlineKeyboard(canGoBack);
+      text = t.prompts.country;
+      reply_markup = buildCountryInlineKeyboard(canGoBack, t);
       break;
 
     case 'city': {
-      text = texts.prompts.city;
+      text = t.prompts.city;
       const cityNav: Array<{ text: string; callback_data: string }> = [];
-      if (canGoBack) cityNav.push({ text: '← Back', callback_data: 'back' });
-      cityNav.push({ text: 'Skip', callback_data: 'skip' });
+      if (canGoBack) cityNav.push({ text: t.ui.back, callback_data: 'back' });
+      cityNav.push({ text: t.ui.skip, callback_data: 'skip' });
       reply_markup = { inline_keyboard: [cityNav] };
       break;
     }
 
     case 'contact': {
       const collected = state.contactMethods || {};
-      const collectedStr = (Object.keys(collected) as ContactType[])
-        .map((t) => `✅ ${CONTACT_LABELS[t]}: ${collected[t]}`)
-        .join('\n');
+      const labels = getContactLabels(state.language);
+      const collectedStr = renderCollectedContacts(collected, labels);
       text = collectedStr
-        ? `${collectedStr}\n\nWould you like to add another contact method?`
-        : texts.prompts.contact;
-      reply_markup = buildContactTypeKeyboard(collected, canGoBack);
+        ? `${collectedStr}\n\n${t.messages.addAnotherContact}`
+        : t.prompts.contact;
+      reply_markup = buildContactTypeKeyboard(collected, canGoBack, labels, { back: t.ui.back, done: t.ui.done });
       break;
     }
 
     default: {
-      const prompts = texts.prompts as Record<string, string>;
-      text = prompts[step] ?? texts.messages.pleaseContinue;
+      const prompts = t.prompts as Record<string, string>;
+      text = prompts[step] ?? t.messages.pleaseContinue;
       reply_markup = canGoBack
         ? { inline_keyboard: [[backBtn]] }
         : { inline_keyboard: [] as unknown[] };
@@ -261,7 +301,8 @@ async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee',
 // ── Onboarding finish ─────────────────────────────────────────────────────────
 
 async function finishOnboarding(chatId: number, telegramId: string, state: UserState) {
-  const roleText = state.role === 'mentor' ? 'mentor' : 'mentee';
+  const t = getTexts(state.language);
+  const roleText = state.role === 'mentor' ? t.summary.roleMentor : t.summary.roleMentee;
   const location =
     state.profile.city && state.profile.country
       ? `${state.profile.city}, ${state.profile.country}`
@@ -269,6 +310,8 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
   const experienceYears = state.profile.experience ? calcExperienceYears(state.profile.experience) : 0;
   const isMentorNow = state.role === 'mentor';
 
+  // Canonical English labels for storage — keeps admin dumps and cross-language
+  // matching consistent regardless of the mentor's own UI language.
   const contactMethods = state.contactMethods
     ? (Object.entries(state.contactMethods) as Array<[ContactType, string]>)
         .map(([type, value]) => `${CONTACT_LABELS[type]}: ${value}`)
@@ -309,27 +352,40 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
   // no User row yet, and update() would throw P2025 and crash the whole process.
   await prisma.user.upsert({
     where: { telegramId },
-    update: { role, ...profileRelation },
-    create: { telegramId, role, ...profileRelation },
+    update: { role, language: state.language, ...profileRelation },
+    create: { telegramId, role, language: state.language, ...profileRelation },
   });
 
   userStates.delete(telegramId);
 
-  const contactSummary = renderContactMethodsSummary(state.contactMethods);
+  // Translated display versions for the summary shown to the user — the DB above
+  // always keeps the canonical English values regardless of this.
+  const displaySkills = (state.profile.skills || '')
+    .split(',').map((s) => s.trim()).filter(Boolean)
+    .map((s) => translateOption(state.language, s, 'skill'))
+    .join(', ');
+  const displayTitle = state.profile.title ? translateOption(state.language, state.profile.title, 'title') : null;
+  const displayCountry = state.profile.country ? translateOption(state.language, state.profile.country, 'country') : null;
+  const displayLocation = state.profile.city && displayCountry
+    ? `${state.profile.city}, ${displayCountry}`
+    : displayCountry || state.profile.city || null;
+
+  const contactLabels = getContactLabels(state.language);
+  const contactSummary = renderContactMethodsSummary(state.contactMethods, contactLabels);
   const summary = [
-    `Name: ${state.profile.name}`,
-    state.profile.title ? `Title: ${state.profile.title}` : null,
-    `Skills: ${state.profile.skills}`,
-    state.profile.experience ? `Career start: ${state.profile.experience}` : null,
-    location ? `Location: ${location}` : null,
-    contactSummary ? `Contact: ${contactSummary}` : null,
-    state.profile.goals ? `Goals: ${state.profile.goals}` : null,
+    `${t.summary.name}: ${state.profile.name}`,
+    displayTitle ? `${t.summary.title}: ${displayTitle}` : null,
+    `${t.summary.skills}: ${displaySkills}`,
+    state.profile.experience ? `${t.summary.careerStart}: ${state.profile.experience}` : null,
+    displayLocation ? `${t.summary.location}: ${displayLocation}` : null,
+    contactSummary ? `${t.summary.contact}: ${contactSummary}` : null,
+    state.profile.goals ? `${t.summary.goals}: ${state.profile.goals}` : null,
   ].filter(Boolean).join('\n');
 
   // Edit the tracked message to show the summary
   if (state.currentMessageId) {
     try {
-      await bot.editMessageText(`Your ${roleText} profile is ready!\n\n${summary}`, {
+      await bot.editMessageText(`${format(t.profileReady, { role: roleText })}\n\n${summary}`, {
         chat_id: chatId,
         message_id: state.currentMessageId,
         reply_markup: { inline_keyboard: [] },
@@ -337,8 +393,8 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
     } catch { /* ignore */ }
   }
 
-  await bot.sendMessage(chatId, texts.chooseRole, {
-    reply_markup: buildMainMenuKeyboard(isMentorNow, adminIds.has(telegramId)),
+  await bot.sendMessage(chatId, t.chooseRole, {
+    reply_markup: buildMainMenuKeyboard(isMentorNow, adminIds.has(telegramId), t),
   });
 }
 
@@ -357,21 +413,14 @@ bot.onText(/\/myid/, async (msg: Message) => {
 });
 
 bot.onText(/\/mentors/, async (msg: Message) => {
-  const telegramId = String(msg.from?.id);
-  if (!adminIds.has(telegramId)) return;
+  await handleAdminMentorsList(msg);
+});
 
-  const mentors = await prisma.mentorProfile.findMany({ orderBy: { createdAt: 'asc' } });
-  if (!mentors.length) { await bot.sendMessage(msg.chat.id, 'No mentors registered yet.'); return; }
-
-  const lines = mentors.map((m, i) => [
-    `${i + 1}. ${m.name} [${m.availability ? 'Available' : 'Busy'}]`,
-    m.title ? `   Title: ${m.title}` : null,
-    `   Skills: ${m.skills.join(', ')}`,
-    `   Exp: ${m.experienceYears} yr${m.experienceYears !== 1 ? 's' : ''}`,
-    m.location ? `   Location: ${m.location}` : null,
-    m.contactMethods.length ? `   Contact: ${m.contactMethods.join(', ')}` : null,
-  ].filter(Boolean).join('\n'));
-  await bot.sendMessage(msg.chat.id, `Mentors (${mentors.length}):\n\n${lines.join('\n\n')}`);
+bot.onText(/^\/language$/, async (msg: Message) => {
+  const chatId = msg.chat.id;
+  await bot.sendMessage(chatId, `${LOCALE_TEXTS.en.prompts.language}\n${LOCALE_TEXTS.fa.prompts.language}`, {
+    reply_markup: buildLanguageInlineKeyboard(),
+  });
 });
 
 bot.onText(/\/start/, async (msg: Message) => {
@@ -385,8 +434,9 @@ bot.onText(/\/start/, async (msg: Message) => {
   });
 
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
-  await bot.sendMessage(chatId, `${texts.welcome}\n\n${texts.chooseRole}`, {
-    reply_markup: buildMainMenuKeyboard(Boolean(user?.mentorProfile), adminIds.has(telegramId)),
+  const t = getTexts(user?.language);
+  await bot.sendMessage(chatId, `${t.welcome}\n\n${t.chooseRole}`, {
+    reply_markup: buildMainMenuKeyboard(Boolean(user?.mentorProfile), adminIds.has(telegramId), t),
   });
 });
 
@@ -395,23 +445,21 @@ bot.onText(/\/start/, async (msg: Message) => {
 const startMentorOnboarding = async (msg: Message) => {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
-  const state: UserState = { role: 'mentor', stepIndex: 0, profile: {}, selectedSkills: [] };
+  const state: UserState = { role: 'mentor', stepIndex: 0, profile: {}, selectedSkills: [], language: 'en' };
   userStates.set(telegramId, state);
-  const sent = await bot.sendMessage(chatId, `Let's create your mentor profile.\n\n${texts.prompts.name}`);
-  state.currentMessageId = (sent as Message).message_id;
+  await showStep(chatId, 'language', 'mentor', telegramId);
 };
 
 const startMenteeOnboarding = async (msg: Message) => {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
-  const state: UserState = { role: 'mentee', stepIndex: 0, profile: {}, selectedSkills: [] };
+  const state: UserState = { role: 'mentee', stepIndex: 0, profile: {}, selectedSkills: [], language: 'en' };
   userStates.set(telegramId, state);
-  const sent = await bot.sendMessage(chatId, `Let's create your mentee profile.\n\n${texts.prompts.name}`);
-  state.currentMessageId = (sent as Message).message_id;
+  await showStep(chatId, 'language', 'mentee', telegramId);
 };
 
-bot.onText(/^Become Mentor$/i, startMentorOnboarding);
-bot.onText(/^Find Mentor$/i, startMenteeOnboarding);
+bot.onText(menuButtonRegex('joinMentors'), startMentorOnboarding);
+bot.onText(menuButtonRegex('needMentor'), startMenteeOnboarding);
 
 // ── Menu action handlers ──────────────────────────────────────────────────────
 
@@ -419,8 +467,9 @@ const handleMatchRequest = async (msg: Message) => {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { menteeProfile: true } });
+  const t = getTexts(user?.language);
 
-  if (!user?.menteeProfile) { await bot.sendMessage(chatId, texts.messages.completeMenteeProfile); return; }
+  if (!user?.menteeProfile) { await bot.sendMessage(chatId, t.messages.completeMenteeProfile); return; }
 
   const mentors = await prisma.mentorProfile.findMany({ where: { availability: true } });
   const matches = findMentorMatches(
@@ -429,24 +478,26 @@ const handleMatchRequest = async (msg: Message) => {
   );
 
   if (!matches.length) {
-    await bot.sendMessage(chatId, texts.messages.noMentorsAvailable);
-    const notification = format(texts.messages.manualMatchNeeded, {
-      menteeName: user.menteeProfile.name,
-      skills: user.menteeProfile.skillsNeeded.join(', ') || 'N/A',
-      experience: user.menteeProfile.experienceYears ?? 0,
-      location: user.menteeProfile.location || 'N/A',
-    });
+    await bot.sendMessage(chatId, t.messages.noMentorsAvailable);
     for (const adminId of adminIds) {
+      const adminUser = await prisma.user.findUnique({ where: { telegramId: adminId } });
+      const at = getTexts(adminUser?.language);
+      const notification = format(at.messages.manualMatchNeeded, {
+        menteeName: user.menteeProfile.name,
+        skills: user.menteeProfile.skillsNeeded.join(', ') || at.messages.notAvailable,
+        experience: user.menteeProfile.experienceYears ?? 0,
+        location: user.menteeProfile.location || at.messages.notAvailable,
+      });
       await bot.sendMessage(Number(adminId), notification).catch(() => {});
     }
     return;
   }
 
   const topMatches = matches.slice(0, 3);
-  let reply = texts.messages.topMentorMatches + '\n';
-  const inlineKeyboard = topMatches.map((m) => [{ text: `Request ${m.name}`, callback_data: `request:${m.id}` }]);
+  let reply = t.messages.topMentorMatches + '\n';
+  const inlineKeyboard = topMatches.map((m) => [{ text: `${t.messages.requestButtonPrefix} ${m.name}`, callback_data: `request:${m.id}` }]);
   for (const m of topMatches) {
-    reply += `\n${m.name} — skills: ${m.skills.join(', ')} — exp: ${m.experienceYears}y — location: ${m.location || 'N/A'}\n`;
+    reply += `\n${m.name} — ${t.summary.skills}: ${m.skills.join(', ')} — ${t.summary.experience}: ${m.experienceYears}y — ${t.summary.location}: ${m.location || t.messages.notAvailable}\n`;
   }
   await bot.sendMessage(chatId, reply, { reply_markup: { inline_keyboard: inlineKeyboard } });
 };
@@ -454,21 +505,26 @@ const handleMatchRequest = async (msg: Message) => {
 const handleSetBusy = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
-  if (!user?.mentorProfile) { await bot.sendMessage(msg.chat.id, texts.messages.needMentorProfile); return; }
+  const t = getTexts(user?.language);
+  if (!user?.mentorProfile) { await bot.sendMessage(msg.chat.id, t.messages.needMentorProfile); return; }
   await prisma.mentorProfile.update({ where: { id: user.mentorProfile.id }, data: { availability: false } });
-  await bot.sendMessage(msg.chat.id, texts.messages.busySet);
+  await bot.sendMessage(msg.chat.id, t.messages.busySet);
 };
 
 const handleSetAvailable = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
-  if (!user?.mentorProfile) { await bot.sendMessage(msg.chat.id, texts.messages.needMentorProfile); return; }
+  const t = getTexts(user?.language);
+  if (!user?.mentorProfile) { await bot.sendMessage(msg.chat.id, t.messages.needMentorProfile); return; }
   await prisma.mentorProfile.update({ where: { id: user.mentorProfile.id }, data: { availability: true } });
-  await bot.sendMessage(msg.chat.id, texts.messages.availableSet);
+  await bot.sendMessage(msg.chat.id, t.messages.availableSet);
 };
 
 const handleHelp = async (msg: Message) => {
-  await bot.sendMessage(msg.chat.id, texts.messages.helpText);
+  const telegramId = String(msg.from?.id);
+  const user = await prisma.user.findUnique({ where: { telegramId } });
+  const t = getTexts(user?.language);
+  await bot.sendMessage(msg.chat.id, t.messages.helpText);
 };
 
 const handleAdminMentorsList = async (msg: Message) => {
@@ -517,8 +573,43 @@ bot.on('callback_query', async (callbackQuery) => {
   const chatId = callbackQuery.message?.chat.id;
   const telegramId = String(callbackQuery.from?.id);
   const state = userStates.get(telegramId);
+  const t = getTexts(state?.language);
 
   await bot.answerCallbackQuery(callbackQuery.id).catch(() => {});
+
+  // ── Language selected (onboarding step 1, or standalone /language command) ──
+  if (data.startsWith('language:')) {
+    if (!chatId) return;
+    const code = data.slice('language:'.length);
+    if (!isLocale(code)) return;
+
+    await prisma.user.upsert({
+      where: { telegramId },
+      update: { language: code },
+      create: { telegramId, language: code },
+    });
+
+    const isOnboardingLanguageStep = !!state && ONBOARDING_STEPS[state.role][state.stepIndex] === 'language';
+    if (state && isOnboardingLanguageStep) {
+      state.language = code;
+      state.stepIndex += 1;
+      const nextStep = ONBOARDING_STEPS[state.role][state.stepIndex] as string | undefined;
+      if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
+      await showStep(chatId, nextStep, state.role, telegramId);
+      return;
+    }
+
+    const nt = getTexts(code);
+    const messageId = callbackQuery.message?.message_id;
+    if (messageId) {
+      await bot.editMessageText(nt.messages.languageUpdated, {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: { inline_keyboard: [] },
+      }).catch(() => {});
+    }
+    return;
+  }
 
   // ── Skill toggle ──
   if (data.startsWith('toggle_skill:')) {
@@ -529,7 +620,7 @@ bot.on('callback_query', async (callbackQuery) => {
     else state.selectedSkills.splice(idx, 1);
     const skillOptions = await getSkillOptions();
     await bot.editMessageReplyMarkup(
-      buildSkillsInlineKeyboard(skillOptions, state.selectedSkills, state.stepIndex > 0),
+      buildSkillsInlineKeyboard(skillOptions, state.selectedSkills, state.stepIndex > 0, t),
       { chat_id: chatId, message_id: state.currentMessageId }
     );
     return;
@@ -550,7 +641,7 @@ bot.on('callback_query', async (callbackQuery) => {
   if (data === 'back') {
     if (!chatId) return;
     if (!state || state.stepIndex === 0) {
-      await bot.sendMessage(chatId, 'Session expired. Please tap Become Mentor or Find Mentor to start again.');
+      await bot.sendMessage(chatId, t.messages.sessionExpired);
       return;
     }
     state.awaitingSubStep = undefined;
@@ -577,14 +668,14 @@ bot.on('callback_query', async (callbackQuery) => {
     const contactType = data.slice('contact_type:'.length) as ContactType;
     state.awaitingContactType = contactType;
     const prompts: Record<ContactType, string> = {
-      telegram: texts.prompts.contactTelegram,
-      phone: texts.prompts.contactPhone,
-      email: texts.prompts.contactEmail,
+      telegram: t.prompts.contactTelegram,
+      phone: t.prompts.contactPhone,
+      email: t.prompts.contactEmail,
     };
     await bot.editMessageText(prompts[contactType], {
       chat_id: chatId,
       message_id: state.currentMessageId,
-      reply_markup: { inline_keyboard: [[{ text: '← Back', callback_data: 'contact_back_to_types' }]] },
+      reply_markup: { inline_keyboard: [[{ text: t.ui.back, callback_data: 'contact_back_to_types' }]] },
     }).catch(() => {});
     return;
   }
@@ -594,16 +685,15 @@ bot.on('callback_query', async (callbackQuery) => {
     if (!state || !chatId) return;
     state.awaitingContactType = undefined;
     const collected = state.contactMethods || {};
-    const collectedStr = (Object.keys(collected) as ContactType[])
-      .map((t) => `✅ ${CONTACT_LABELS[t]}: ${collected[t]}`)
-      .join('\n');
+    const labels = getContactLabels(state.language);
+    const collectedStr = renderCollectedContacts(collected, labels);
     const prompt = collectedStr
-      ? `${collectedStr}\n\nWould you like to add another contact method?`
-      : texts.prompts.contact;
+      ? `${collectedStr}\n\n${t.messages.addAnotherContact}`
+      : t.prompts.contact;
     await bot.editMessageText(prompt, {
       chat_id: chatId,
       message_id: state.currentMessageId,
-      reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0),
+      reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0, labels, { back: t.ui.back, done: t.ui.done }),
     }).catch(() => {});
     return;
   }
@@ -613,7 +703,7 @@ bot.on('callback_query', async (callbackQuery) => {
     if (!state || !chatId) return;
     const collected = state.contactMethods || {};
     if (Object.keys(collected).length === 0) {
-      await bot.sendMessage(chatId, 'Please add at least one contact method before continuing.');
+      await bot.sendMessage(chatId, t.messages.addAtLeastOneContact);
       return;
     }
     state.stepIndex += 1;
@@ -629,10 +719,10 @@ bot.on('callback_query', async (callbackQuery) => {
     const year = data.split(':')[1];
     state.profile.startYear = year;
     state.awaitingSubStep = 'month';
-    await bot.editMessageText(texts.prompts.experienceMonth, {
+    await bot.editMessageText(t.prompts.experienceMonth, {
       chat_id: chatId,
       message_id: state.currentMessageId,
-      reply_markup: buildMonthKeyboard(year),
+      reply_markup: buildMonthKeyboard(year, t),
     });
     return;
   }
@@ -642,10 +732,10 @@ bot.on('callback_query', async (callbackQuery) => {
     if (!state || !chatId) return;
     state.awaitingSubStep = 'year';
     delete state.profile.startYear;
-    await bot.editMessageText(texts.prompts.experience, {
+    await bot.editMessageText(t.prompts.experience, {
       chat_id: chatId,
       message_id: state.currentMessageId,
-      reply_markup: buildYearKeyboard(state.stepIndex > 0),
+      reply_markup: buildYearKeyboard(state.stepIndex > 0, t),
     });
     return;
   }
@@ -662,7 +752,7 @@ bot.on('callback_query', async (callbackQuery) => {
     if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
     // Brief confirmation in the message before transitioning
     try {
-      await bot.editMessageText(`Career start: ${monthName} ${year}`, {
+      await bot.editMessageText(`${t.summary.careerStart}: ${monthName} ${year}`, {
         chat_id: chatId,
         message_id: state.currentMessageId,
         reply_markup: { inline_keyboard: [] },
@@ -698,11 +788,12 @@ bot.on('callback_query', async (callbackQuery) => {
   if (data.startsWith('request:')) {
     const mentorId = Number(data.split(':')[1]);
     const mentee = await prisma.user.findUnique({ where: { telegramId }, include: { menteeProfile: true } });
-    if (!mentee?.menteeProfile) { if (chatId) await bot.sendMessage(chatId, texts.messages.completeMenteeProfile); return; }
+    const mt = getTexts(mentee?.language);
+    if (!mentee?.menteeProfile) { if (chatId) await bot.sendMessage(chatId, mt.messages.completeMenteeProfile); return; }
     const mentor = await prisma.mentorProfile.findUnique({ where: { id: mentorId } });
-    if (!mentor) { if (chatId) await bot.sendMessage(chatId, texts.messages.mentorNotFound); return; }
+    if (!mentor) { if (chatId) await bot.sendMessage(chatId, mt.messages.mentorNotFound); return; }
     const mentorUser = await prisma.user.findUnique({ where: { id: mentor.userId } });
-    if (!mentorUser) { if (chatId) await bot.sendMessage(chatId, texts.messages.mentorUserNotFound); return; }
+    if (!mentorUser) { if (chatId) await bot.sendMessage(chatId, mt.messages.mentorUserNotFound); return; }
 
     const existingRequest = await prisma.mentorshipRequest.findFirst({
       where: {
@@ -712,7 +803,7 @@ bot.on('callback_query', async (callbackQuery) => {
       },
     });
     if (existingRequest) {
-      if (chatId) await bot.sendMessage(chatId, texts.messages.alreadyRequested);
+      if (chatId) await bot.sendMessage(chatId, mt.messages.alreadyRequested);
       return;
     }
 
@@ -723,11 +814,12 @@ bot.on('callback_query', async (callbackQuery) => {
       },
     });
 
-    if (chatId) await bot.sendMessage(chatId, format(texts.messages.requestSent, { mentorName: mentor.name }));
+    if (chatId) await bot.sendMessage(chatId, format(mt.messages.requestSent, { mentorName: mentor.name }));
+    const rt = getTexts(mentorUser.language);
     await bot.sendMessage(
       Number(mentorUser.telegramId),
-      format(texts.messages.requestNew, { menteeName: mentee.menteeProfile.name, menteeId: mentee.menteeProfile.id }),
-      { reply_markup: { inline_keyboard: [[{ text: 'Accept', callback_data: `accept:${mentee.menteeProfile.id}` }, { text: 'Decline', callback_data: `decline:${mentee.menteeProfile.id}` }]] } }
+      format(rt.messages.requestNew, { menteeName: mentee.menteeProfile.name, menteeId: mentee.menteeProfile.id }),
+      { reply_markup: { inline_keyboard: [[{ text: rt.actions.accept, callback_data: `accept:${mentee.menteeProfile.id}` }, { text: rt.actions.decline, callback_data: `decline:${mentee.menteeProfile.id}` }]] } }
     );
     return;
   }
@@ -737,7 +829,8 @@ bot.on('callback_query', async (callbackQuery) => {
     const [action, menteeProfileIdStr] = data.split(':');
     const menteeProfileId = Number(menteeProfileIdStr);
     const mentorUser = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
-    if (!mentorUser?.mentorProfile) { if (chatId) await bot.sendMessage(chatId, texts.messages.needMentorProfile); return; }
+    const mt = getTexts(mentorUser?.language);
+    if (!mentorUser?.mentorProfile) { if (chatId) await bot.sendMessage(chatId, mt.messages.needMentorProfile); return; }
 
     const request = await prisma.mentorshipRequest.findFirst({
       where: {
@@ -746,7 +839,7 @@ bot.on('callback_query', async (callbackQuery) => {
         status: 'PENDING',
       },
     });
-    if (!request) { if (chatId) await bot.sendMessage(chatId, texts.messages.noPendingRequest); return; }
+    if (!request) { if (chatId) await bot.sendMessage(chatId, mt.messages.noPendingRequest); return; }
 
     await prisma.mentorshipRequest.update({
       where: { id: request.id },
@@ -755,11 +848,17 @@ bot.on('callback_query', async (callbackQuery) => {
 
     const menteeProfile = await prisma.menteeProfile.findUnique({ where: { id: menteeProfileId }, include: { user: true } });
     if (action === 'accept') {
-      if (chatId) await bot.sendMessage(chatId, texts.messages.requestAccepted);
-      if (menteeProfile?.user) await bot.sendMessage(Number(menteeProfile.user.telegramId), texts.messages.acceptedNotification);
+      if (chatId) await bot.sendMessage(chatId, mt.messages.requestAccepted);
+      if (menteeProfile?.user) {
+        const rt = getTexts(menteeProfile.user.language);
+        await bot.sendMessage(Number(menteeProfile.user.telegramId), rt.messages.acceptedNotification);
+      }
     } else {
-      if (chatId) await bot.sendMessage(chatId, texts.messages.requestDeclined);
-      if (menteeProfile?.user) await bot.sendMessage(Number(menteeProfile.user.telegramId), texts.messages.declinedNotification);
+      if (chatId) await bot.sendMessage(chatId, mt.messages.requestDeclined);
+      if (menteeProfile?.user) {
+        const rt = getTexts(menteeProfile.user.language);
+        await bot.sendMessage(Number(menteeProfile.user.telegramId), rt.messages.declinedNotification);
+      }
     }
     return;
   }
@@ -776,18 +875,20 @@ bot.on('message', async (msg: Message) => {
   const state = userStates.get(telegramId);
 
   if (!state) {
-    if (text === texts.startMenu.busy) { await handleSetBusy(msg); return; }
-    if (text === texts.startMenu.available) { await handleSetAvailable(msg); return; }
-    if (text === texts.startMenu.help) { await handleHelp(msg); return; }
-    if (text === texts.startMenu.adminMentors) { await handleAdminMentorsList(msg); return; }
-    if (text === texts.startMenu.adminMentees) { await handleAdminMenteesList(msg); return; }
-    if (text === texts.startMenu.adminRestart) { await handleAdminRestart(msg); return; }
+    if (matchesMenuButton(text, 'busy')) { await handleSetBusy(msg); return; }
+    if (matchesMenuButton(text, 'available')) { await handleSetAvailable(msg); return; }
+    if (matchesMenuButton(text, 'help')) { await handleHelp(msg); return; }
+    if (matchesMenuButton(text, 'adminMentors')) { await handleAdminMentorsList(msg); return; }
+    if (matchesMenuButton(text, 'adminMentees')) { await handleAdminMenteesList(msg); return; }
+    if (matchesMenuButton(text, 'adminRestart')) { await handleAdminRestart(msg); return; }
     return;
   }
 
+  const t = getTexts(state.language);
+
   // Inline keyboard steps — reject freetext
   if (state.awaitingSubStep === 'year' || state.awaitingSubStep === 'month') {
-    await bot.sendMessage(chatId, texts.messages.useButtons);
+    await bot.sendMessage(chatId, t.messages.useButtons);
     return;
   }
 
@@ -798,34 +899,33 @@ bot.on('message', async (msg: Message) => {
   if (currentStep === 'contact') {
     if (!state.awaitingContactType) {
       // No type chosen yet — nudge to use buttons
-      await bot.sendMessage(chatId, texts.messages.useButtons);
+      await bot.sendMessage(chatId, t.messages.useButtons);
       return;
     }
     if (state.awaitingContactType === 'email' && !isValidEmail(text)) {
-      await bot.sendMessage(chatId, texts.messages.invalidEmail);
+      await bot.sendMessage(chatId, t.messages.invalidEmail);
       return;
     }
     if (!state.contactMethods) state.contactMethods = {};
     state.contactMethods[state.awaitingContactType] = text;
     state.awaitingContactType = undefined;
     const collected = state.contactMethods;
+    const labels = getContactLabels(state.language);
     const all: ContactType[] = ['telegram', 'phone', 'email'];
-    const remaining = all.filter((t) => !collected[t]);
-    const collectedStr = (Object.keys(collected) as ContactType[])
-      .map((t) => `✅ ${CONTACT_LABELS[t]}: ${collected[t]}`)
-      .join('\n');
+    const remaining = all.filter((ct) => !collected[ct]);
+    const collectedStr = renderCollectedContacts(collected, labels);
     const prompt = remaining.length > 0
-      ? `${collectedStr}\n\nWould you like to add another contact method?`
-      : `${collectedStr}\n\nAll contact methods added!`;
+      ? `${collectedStr}\n\n${t.messages.addAnotherContact}`
+      : `${collectedStr}\n\n${t.messages.allContactMethodsAdded}`;
     try {
       await bot.editMessageText(prompt, {
         chat_id: chatId,
         message_id: state.currentMessageId,
-        reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0),
+        reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0, labels, { back: t.ui.back, done: t.ui.done }),
       });
     } catch {
       const sent = await bot.sendMessage(chatId, prompt, {
-        reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0),
+        reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0, labels, { back: t.ui.back, done: t.ui.done }),
       });
       state.currentMessageId = (sent as Message).message_id;
     }
@@ -839,7 +939,7 @@ bot.on('message', async (msg: Message) => {
       if (!state.selectedSkills.includes(s)) state.selectedSkills.push(s);
     }
     const skillOpts = await getSkillOptions();
-    const markup = buildSkillsInlineKeyboard(skillOpts, state.selectedSkills, state.stepIndex > 0);
+    const markup = buildSkillsInlineKeyboard(skillOpts, state.selectedSkills, state.stepIndex > 0, t);
     try {
       await bot.editMessageReplyMarkup(markup, { chat_id: chatId, message_id: state.currentMessageId });
     } catch (err) {
