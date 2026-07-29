@@ -21,13 +21,13 @@ const SKILL_LABELS_FA: Record<string, string> = {
 };
 
 const TITLE_LABELS_FA: Record<string, string> = {
-  'Frontend Engineer': ' فرانت‌اند',
-  'Backend Engineer': ' بک‌اند',
-  'Full Stack Engineer': ' فول‌استک',
+  'Frontend Engineer': 'مهندس فرانت‌اند',
+  'Backend Engineer': 'مهندس بک‌اند',
+  'Full Stack Engineer': 'مهندس فول‌استک',
   'Mobile Engineer': 'مهندس موبایل',
   'Data Scientist': 'دیتاساینتیست',
-  'ML Engineer': ' یادگیری ماشین',
-  'DevOps Engineer': ' DevOps',
+  'ML Engineer': 'مهندس یادگیری ماشین',
+  'DevOps Engineer': 'مهندس DevOps',
   'Product Manager': 'مدیر محصول',
   'UX/UI Designer': 'طراح UX/UI',
   'Engineering Manager': 'مدیر مهندسی',
@@ -53,9 +53,9 @@ const COUNTRY_LABELS_FA: Record<string, string> = {
 };
 
 export const CONTACT_LABELS_FA: Record<ContactType, string> = {
-  telegram: 'آیدی تلگرام',
-  phone: 'شماره تلفن',
-  email: 'ایمیل',
+  telegram: '💬 آیدی تلگرام',
+  phone: '📱 شماره تلفن',
+  email: '📧 ایمیل',
 };
 
 type OptionKind = 'skill' | 'title' | 'country';

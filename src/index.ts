@@ -67,6 +67,10 @@ function renderCollectedContacts(collected: Partial<Record<ContactType, string>>
     .join('\n');
 }
 
+function languageDisplayName(code: string): string {
+  return LANGUAGE_CHOICES.find((l) => l.code === code)?.label ?? code;
+}
+
 // ── Inline keyboard builders ──────────────────────────────────────────────────
 
 async function getSkillOptions(): Promise<string[]> {
@@ -214,7 +218,7 @@ async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee',
   switch (step) {
     case 'language':
       // Shown before we know the user's preference, so greet in both languages.
-      text = `${LOCALE_TEXTS.en.prompts.language}\n${LOCALE_TEXTS.fa.prompts.language}`;
+      text = `🌐 ${LOCALE_TEXTS.en.prompts.language}\n${LOCALE_TEXTS.fa.prompts.language}`;
       reply_markup = buildLanguageInlineKeyboard();
       break;
 
@@ -275,6 +279,9 @@ async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee',
     }
   }
 
+  const totalSteps = ONBOARDING_STEPS[role].length;
+  text = `${format(t.ui.stepIndicator, { current: state.stepIndex + 1, total: totalSteps })}\n${text}`;
+
   const markup = reply_markup as TelegramBot.InlineKeyboardMarkup;
 
   if (state.currentMessageId) {
@@ -330,6 +337,7 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
             city: state.profile.city || null,
             location,
             contactMethods,
+            language: state.language,
           },
         },
       }
@@ -343,6 +351,7 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
             country: state.profile.country || null,
             city: state.profile.city || null,
             location,
+            language: state.language,
           },
         },
       };
@@ -378,6 +387,7 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
     `${t.summary.skills}: ${displaySkills}`,
     state.profile.experience ? `${t.summary.careerStart}: ${state.profile.experience}` : null,
     displayLocation ? `${t.summary.location}: ${displayLocation}` : null,
+    `${t.summary.language}: ${languageDisplayName(state.language)}`,
     contactSummary ? `${t.summary.contact}: ${contactSummary}` : null,
     state.profile.goals ? `${t.summary.goals}: ${state.profile.goals}` : null,
   ].filter(Boolean).join('\n');
@@ -418,7 +428,7 @@ bot.onText(/\/mentors/, async (msg: Message) => {
 
 bot.onText(/^\/language$/, async (msg: Message) => {
   const chatId = msg.chat.id;
-  await bot.sendMessage(chatId, `${LOCALE_TEXTS.en.prompts.language}\n${LOCALE_TEXTS.fa.prompts.language}`, {
+  await bot.sendMessage(chatId, `🌐 ${LOCALE_TEXTS.en.prompts.language}\n${LOCALE_TEXTS.fa.prompts.language}`, {
     reply_markup: buildLanguageInlineKeyboard(),
   });
 });
@@ -473,8 +483,8 @@ const handleMatchRequest = async (msg: Message) => {
 
   const mentors = await prisma.mentorProfile.findMany({ where: { availability: true } });
   const matches = findMentorMatches(
-    { name: user.menteeProfile.name, skillsNeeded: user.menteeProfile.skillsNeeded, experienceYears: user.menteeProfile.experienceYears, location: user.menteeProfile.location },
-    mentors.map((m) => ({ id: m.id, name: m.name, skills: m.skills, experienceYears: m.experienceYears, location: m.location, availability: m.availability }))
+    { name: user.menteeProfile.name, skillsNeeded: user.menteeProfile.skillsNeeded, experienceYears: user.menteeProfile.experienceYears, location: user.menteeProfile.location, language: user.menteeProfile.language },
+    mentors.map((m) => ({ id: m.id, name: m.name, skills: m.skills, experienceYears: m.experienceYears, location: m.location, availability: m.availability, language: m.language }))
   );
 
   if (!matches.length) {
@@ -497,7 +507,8 @@ const handleMatchRequest = async (msg: Message) => {
   let reply = t.messages.topMentorMatches + '\n';
   const inlineKeyboard = topMatches.map((m) => [{ text: `${t.messages.requestButtonPrefix} ${m.name}`, callback_data: `request:${m.id}` }]);
   for (const m of topMatches) {
-    reply += `\n${m.name} — ${t.summary.skills}: ${m.skills.join(', ')} — ${t.summary.experience}: ${m.experienceYears}y — ${t.summary.location}: ${m.location || t.messages.notAvailable}\n`;
+    const displaySkills = m.skills.map((s) => translateOption(t.locale, s, 'skill')).join(', ');
+    reply += `\n👤 ${m.name}\n${t.summary.skills}: ${displaySkills}\n${t.summary.experience}: ${format(t.summary.yearsLabel, { n: m.experienceYears })}\n${t.summary.location}: ${m.location || t.messages.notAvailable}\n${t.summary.language}: ${languageDisplayName(m.language)}\n`;
   }
   await bot.sendMessage(chatId, reply, { reply_markup: { inline_keyboard: inlineKeyboard } });
 };
@@ -530,38 +541,46 @@ const handleHelp = async (msg: Message) => {
 const handleAdminMentorsList = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
   if (!adminIds.has(telegramId)) return;
+  const admin = await prisma.user.findUnique({ where: { telegramId } });
+  const t = getTexts(admin?.language);
   const mentors = await prisma.mentorProfile.findMany({ orderBy: { createdAt: 'asc' } });
-  if (!mentors.length) { await bot.sendMessage(msg.chat.id, 'No mentors registered yet.'); return; }
+  if (!mentors.length) { await bot.sendMessage(msg.chat.id, t.admin.noMentorsRegistered); return; }
   const lines = mentors.map((m, i) => [
-    `${i + 1}. ${m.name} [${m.availability ? 'Available' : 'Busy'}]`,
-    m.title ? `   Title: ${m.title}` : null,
-    `   Skills: ${m.skills.join(', ')}`,
-    `   Exp: ${m.experienceYears} yr${m.experienceYears !== 1 ? 's' : ''}`,
-    m.location ? `   Location: ${m.location}` : null,
-    m.contactMethods.length ? `   Contact: ${m.contactMethods.join(', ')}` : null,
+    `${i + 1}. ${m.name} [${m.availability ? t.admin.available : t.admin.busy}]`,
+    m.title ? `   ${t.summary.title}: ${translateOption(t.locale, m.title, 'title')}` : null,
+    `   ${t.summary.skills}: ${m.skills.map((s) => translateOption(t.locale, s, 'skill')).join(', ')}`,
+    `   ${t.summary.experience}: ${format(t.summary.yearsLabel, { n: m.experienceYears })}`,
+    m.location ? `   ${t.summary.location}: ${m.location}` : null,
+    `   ${t.summary.language}: ${languageDisplayName(m.language)}`,
+    m.contactMethods.length ? `   ${t.summary.contact}: ${m.contactMethods.join(', ')}` : null,
   ].filter(Boolean).join('\n'));
-  await bot.sendMessage(msg.chat.id, `Mentors (${mentors.length}):\n\n${lines.join('\n\n')}`);
+  await bot.sendMessage(msg.chat.id, `${format(t.admin.mentorsListHeader, { count: mentors.length })}\n\n${lines.join('\n\n')}`);
 };
 
 const handleAdminMenteesList = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
   if (!adminIds.has(telegramId)) return;
+  const admin = await prisma.user.findUnique({ where: { telegramId } });
+  const t = getTexts(admin?.language);
   const mentees = await prisma.menteeProfile.findMany({ orderBy: { createdAt: 'asc' } });
-  if (!mentees.length) { await bot.sendMessage(msg.chat.id, 'No mentees registered yet.'); return; }
+  if (!mentees.length) { await bot.sendMessage(msg.chat.id, t.admin.noMenteesRegistered); return; }
   const lines = mentees.map((m, i) => [
     `${i + 1}. ${m.name}`,
-    `   Skills: ${m.skillsNeeded.join(', ')}`,
-    m.experienceYears != null ? `   Exp: ${m.experienceYears} yr${m.experienceYears !== 1 ? 's' : ''}` : null,
-    m.location ? `   Location: ${m.location}` : null,
-    m.goals ? `   Goals: ${m.goals}` : null,
+    `   ${t.summary.skills}: ${m.skillsNeeded.map((s) => translateOption(t.locale, s, 'skill')).join(', ')}`,
+    m.experienceYears != null ? `   ${t.summary.experience}: ${format(t.summary.yearsLabel, { n: m.experienceYears })}` : null,
+    m.location ? `   ${t.summary.location}: ${m.location}` : null,
+    `   ${t.summary.language}: ${languageDisplayName(m.language)}`,
+    m.goals ? `   ${t.summary.goals}: ${m.goals}` : null,
   ].filter(Boolean).join('\n'));
-  await bot.sendMessage(msg.chat.id, `Mentees (${mentees.length}):\n\n${lines.join('\n\n')}`);
+  await bot.sendMessage(msg.chat.id, `${format(t.admin.menteesListHeader, { count: mentees.length })}\n\n${lines.join('\n\n')}`);
 };
 
 const handleAdminRestart = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
   if (!adminIds.has(telegramId)) return;
-  await bot.sendMessage(msg.chat.id, 'Restarting...');
+  const admin = await prisma.user.findUnique({ where: { telegramId } });
+  const t = getTexts(admin?.language);
+  await bot.sendMessage(msg.chat.id, t.admin.restarting);
   setTimeout(() => process.exit(0), 500);
 };
 

@@ -1,9 +1,9 @@
 export type ContactType = 'telegram' | 'phone' | 'email';
 
 export const CONTACT_LABELS: Record<ContactType, string> = {
-  telegram: 'Telegram ID',
-  phone: 'Phone Number',
-  email: 'Email',
+  telegram: '💬 Telegram ID',
+  phone: '📱 Phone Number',
+  email: '📧 Email',
 };
 
 export function buildContactTypeKeyboard(

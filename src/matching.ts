@@ -5,6 +5,7 @@ export type MentorProfileLike = {
   experienceYears: number;
   location: string | null;
   availability: boolean;
+  language: string;
 };
 
 export type MenteeProfileLike = {
@@ -12,6 +13,7 @@ export type MenteeProfileLike = {
   skillsNeeded: string[];
   experienceYears: number | null;
   location: string | null;
+  language: string;
 };
 
 export function normalizeSkills(skills: string[]): string[] {
@@ -33,7 +35,8 @@ export function findMentorMatches(mentee: MenteeProfileLike, mentors: MentorProf
       const overlap = mentorSkills.filter((skill) => menteeSkills.includes(skill)).length;
       const locationBonus = menteeLocation && mentor.location?.trim().toLowerCase() === menteeLocation ? 2 : 0;
       const experienceBonus = menteeExperience > 0 ? Math.max(0, 2 - Math.abs(mentor.experienceYears - menteeExperience)) : 0;
-      const score = overlap * 3 + locationBonus + experienceBonus;
+      const languageBonus = mentor.language === mentee.language ? 2 : 0;
+      const score = overlap * 3 + locationBonus + experienceBonus + languageBonus;
 
       return { ...mentor, score };
     })

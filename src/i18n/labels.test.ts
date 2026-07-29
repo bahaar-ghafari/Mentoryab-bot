@@ -26,9 +26,9 @@ describe('getContactLabels', () => {
 
   it('returns Farsi labels for fa without mutating the English map', () => {
     const faLabels = getContactLabels('fa');
-    expect(faLabels.telegram).toBe('آیدی تلگرام');
-    expect(faLabels.phone).toBe('شماره تلفن');
-    expect(faLabels.email).toBe('ایمیل');
-    expect(CONTACT_LABELS.telegram).toBe('Telegram ID');
+    expect(faLabels.telegram).toBe('💬 آیدی تلگرام');
+    expect(faLabels.phone).toBe('📱 شماره تلفن');
+    expect(faLabels.email).toBe('📧 ایمیل');
+    expect(CONTACT_LABELS.telegram).toBe('💬 Telegram ID');
   });
 });

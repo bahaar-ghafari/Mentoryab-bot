@@ -48,6 +48,7 @@ model MentorProfile {
   location        String?
   availability    Boolean  @default(true)
   contactMethods  String[] @default([])
+  language        String   @default("en")
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   mentorshipRequests MentorshipRequest[]
@@ -64,6 +65,7 @@ model MenteeProfile {
   country         String?
   city            String?
   location        String?
+  language        String   @default("en")
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   mentorshipRequests MentorshipRequest[]
