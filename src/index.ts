@@ -418,15 +418,24 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
     state.profile.goals ? `${t.summary.goals}: ${state.profile.goals}` : null,
   ].filter(Boolean).join('\n');
 
-  // Edit the tracked message to show the summary
+  // Show the completion summary — edit the tracked message if possible, but always
+  // fall back to a fresh message so the summary is never silently dropped.
+  const readyText = `${format(t.profileReady, { role: roleText })}\n\n${summary}`;
+  let summaryShown = false;
   if (state.currentMessageId) {
     try {
-      await bot.editMessageText(`${format(t.profileReady, { role: roleText })}\n\n${summary}`, {
+      await bot.editMessageText(readyText, {
         chat_id: chatId,
         message_id: state.currentMessageId,
         reply_markup: { inline_keyboard: [] },
       });
-    } catch { /* ignore */ }
+      summaryShown = true;
+    } catch (err) {
+      console.error('finishOnboarding: failed to edit summary message:', err);
+    }
+  }
+  if (!summaryShown) {
+    await bot.sendMessage(chatId, readyText);
   }
 
   await bot.sendMessage(chatId, t.chooseRole, {
