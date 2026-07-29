@@ -62,7 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to VPS
-        uses: appleboy/ssh-action@v1.10.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
@@ -75,8 +75,7 @@ jobs:
             # Pull latest repo changes including compose file
             git pull origin main
 
-            # Authenticate to GHCR and pull the updated bot image
-            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
+            # Image is public on GHCR — no login needed to pull
             docker compose -f docker-compose.prod.yml pull bot
 
             # Restart bot service only
