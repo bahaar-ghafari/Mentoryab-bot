@@ -6,6 +6,7 @@ import { findMentorMatches } from './matching.js';
 import { getTexts, LOCALE_TEXTS, LANGUAGE_CHOICES, isLocale, type Locale, type Texts } from './i18n/index.js';
 import { translateOption, getContactLabels } from './i18n/labels.js';
 import { SKILL_OPTIONS } from './i18n/options.js';
+import { matchesMenuButton, menuButtonRegex } from './i18n/menuButtons.js';
 import {
   ContactType,
   CONTACT_LABELS,
@@ -46,19 +47,6 @@ const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Se
 
 function format(text: string, values: Record<string, string | number> = {}) {
   return text.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ''));
-}
-
-// A reply-keyboard button's label depends on the tapping user's language, which we
-// don't know until we recognize the button — so match against every locale's label
-// rather than requiring a DB lookup just to interpret which button was pressed.
-function matchesMenuButton(text: string, key: keyof Texts['startMenu']): boolean {
-  return Object.values(LOCALE_TEXTS).some((loc) => loc.startMenu[key] === text);
-}
-
-function menuButtonRegex(key: keyof Texts['startMenu']): RegExp {
-  const variants = Object.values(LOCALE_TEXTS).map((loc) => loc.startMenu[key]);
-  const escaped = variants.map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  return new RegExp(`^(${escaped.join('|')})$`, 'i');
 }
 
 function renderCollectedContacts(collected: Partial<Record<ContactType, string>>, labels: Record<ContactType, string>): string {
