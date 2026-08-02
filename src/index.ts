@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 import express from 'express';
 import TelegramBot, { type Message } from 'node-telegram-bot-api';
 import { PrismaClient, Prisma } from '@prisma/client';
-import { findMentorMatches } from './matching.js';
+import { findMentorMatches, canonicalizeSkill } from './matching.js';
 import { getTexts, LOCALE_TEXTS, LANGUAGE_CHOICES, isLocale, type Locale, type Texts } from './i18n/index.js';
 import { translateOption, getContactLabels } from './i18n/labels.js';
 import { SKILL_OPTIONS } from './i18n/options.js';
@@ -101,7 +101,7 @@ async function getSkillOptions(): Promise<string[]> {
   const base = SKILL_OPTIONS.filter((s) => s !== 'Other');
   const combined = [...base];
   for (const s of mentorSkills) {
-    if (!combined.some((o) => o.toLowerCase() === s.toLowerCase())) {
+    if (!combined.some((o) => canonicalizeSkill(o) === canonicalizeSkill(s))) {
       combined.push(s);
     }
   }
@@ -125,7 +125,7 @@ function buildSkillsInlineKeyboard(options: string[], selected: string[], canGoB
   }
 
   // Custom typed skills not in predefined list — always shown as selected ✅, untranslated
-  const custom = selected.filter((s) => !options.some((o) => o.toLowerCase() === s.toLowerCase()));
+  const custom = selected.filter((s) => !options.some((o) => canonicalizeSkill(o) === canonicalizeSkill(s)));
   for (let i = 0; i < custom.length; i += 2) {
     rows.push(
       custom.slice(i, i + 2).map((skill) => ({
@@ -1270,7 +1270,9 @@ bot.on('message', async (msg: Message) => {
   if (currentStep === 'skills') {
     const typed = text.split(',').map((s) => s.trim()).filter(Boolean);
     for (const s of typed) {
-      if (!state.selectedSkills.includes(s)) state.selectedSkills.push(s);
+      if (!state.selectedSkills.some((existing) => canonicalizeSkill(existing) === canonicalizeSkill(s))) {
+        state.selectedSkills.push(s);
+      }
     }
     const skillOpts = await getSkillOptions();
     const markup = buildSkillsInlineKeyboard(skillOpts, state.selectedSkills, state.stepIndex > 0, t);

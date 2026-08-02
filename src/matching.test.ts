@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { findMentorMatches, normalizeSkills, expandAbbreviations } from './matching.js';
+import { findMentorMatches, normalizeSkills, expandAbbreviations, canonicalizeSkill } from './matching.js';
 import type { MenteeProfileLike, MentorProfileLike } from './matching.js';
+
+describe('canonicalizeSkill', () => {
+  it('maps known synonyms to one canonical form', () => {
+    expect(canonicalizeSkill('TS')).toBe('typescript');
+    expect(canonicalizeSkill('TypeScript')).toBe('typescript');
+    expect(canonicalizeSkill('ReactJS')).toBe('react');
+    expect(canonicalizeSkill('React.js')).toBe('react');
+  });
+
+  it('leaves unmapped terms unchanged (just trimmed/lowercased)', () => {
+    expect(canonicalizeSkill('  Leadership  ')).toBe('leadership');
+  });
+});
 
 describe('normalizeSkills', () => {
   it('splits comma-separated entries, trims, and lowercases', () => {
@@ -17,6 +30,10 @@ describe('normalizeSkills', () => {
 
   it('returns an empty array for no input', () => {
     expect(normalizeSkills([])).toEqual([]);
+  });
+
+  it('treats TS and TypeScript as the same skill', () => {
+    expect(normalizeSkills(['TS'])).toEqual(normalizeSkills(['TypeScript']));
   });
 });
 
@@ -115,6 +132,15 @@ describe('findMentorMatches', () => {
     const [match] = findMentorMatches(mentee, mentors);
     expect(match.overlap).toBe(0);
     expect(match.score).toBeGreaterThan(0); // location/language bonuses still apply
+  });
+
+  it('matches a mentee searching "TypeScript" against a mentor who listed "TS"', () => {
+    const menteeWantsTypeScript: MenteeProfileLike = { ...mentee, skillsNeeded: ['TypeScript'] };
+    const mentors: MentorProfileLike[] = [
+      { id: 1, name: 'Lists TS', ...baseMentor, skills: ['TS'] },
+    ];
+    const [match] = findMentorMatches(menteeWantsTypeScript, mentors);
+    expect(match.overlap).toBe(1);
   });
 });
 

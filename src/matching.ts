@@ -17,10 +17,42 @@ export type MenteeProfileLike = {
   language: string;
 };
 
+// Different names for the same underlying skill (e.g. "TS" and "TypeScript")
+// that should be treated as one, not two separate skills. Distinct from
+// SKILL_ABBREVIATIONS below, which maps shorthand to a job *title*, not a skill
+// synonym — keys here must not collide with that map's keys.
+const SKILL_ALIASES: Record<string, string> = {
+  ts: 'typescript',
+  js: 'javascript',
+  reactjs: 'react',
+  'react.js': 'react',
+  'react js': 'react',
+  vuejs: 'vue',
+  'vue.js': 'vue',
+  'vue js': 'vue',
+  angularjs: 'angular',
+  'angular.js': 'angular',
+  nodejs: 'node.js',
+  'node js': 'node.js',
+  nextjs: 'next.js',
+  'next js': 'next.js',
+  nuxtjs: 'nuxt.js',
+  postgres: 'postgresql',
+  psql: 'postgresql',
+  mongo: 'mongodb',
+  py: 'python',
+  golang: 'go',
+};
+
+export function canonicalizeSkill(skill: string): string {
+  const key = skill.trim().toLowerCase();
+  return SKILL_ALIASES[key] ?? key;
+}
+
 export function normalizeSkills(skills: string[]): string[] {
   return skills
     .flatMap((skill) => skill.split(','))
-    .map((skill) => skill.trim().toLowerCase())
+    .map((skill) => canonicalizeSkill(skill))
     .filter(Boolean);
 }
 
