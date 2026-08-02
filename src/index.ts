@@ -882,41 +882,130 @@ const MAX_EXPLANATION_LENGTH = 500;
 // after an automatic search found nobody with a relevant skill/title.
 const pendingMentorExplanation = new Set<string>();
 
-async function searchMentorsForMentee(chatId: number, telegramId: string) {
+interface MentorBrowseState {
+  language?: string;
+  title?: string;
+  country?: string;
+  page: number;
+  messageId?: number;
+}
+const mentorBrowseState = new Map<string, MentorBrowseState>();
+const MENTORS_PER_PAGE = 5;
+
+async function renderMentorBrowseList(chatId: number, telegramId: string) {
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { menteeProfile: true } });
   const t = getTexts(user?.language);
-
   if (!user?.menteeProfile) { await bot.sendMessage(chatId, t.messages.completeMenteeProfile); return; }
 
-  const mentors = await prisma.mentorProfile.findMany({ where: { availability: true } });
-  const matches = findMentorMatches(
-    { name: user.menteeProfile.name, skillsNeeded: user.menteeProfile.skillsNeeded, experienceYears: user.menteeProfile.experienceYears, location: user.menteeProfile.location, language: user.menteeProfile.language },
-    mentors.map((m) => ({ id: m.id, name: m.name, title: m.title, skills: m.skills, experienceYears: m.experienceYears, location: m.location, availability: m.availability, language: m.language }))
-  );
+  const allMentors = await prisma.mentorProfile.findMany({ where: { availability: true } });
 
-  // Every available mentor is always returned by findMentorMatches (it only
-  // sorts, never filters by relevance), so "no options" means none of them
-  // share any skill/title with what this mentee is looking for — not
-  // literally zero mentors registered.
-  const relevantMatches = matches.filter((m) => m.overlap > 0);
-
-  if (!relevantMatches.length) {
+  if (!allMentors.length) {
     pendingMentorExplanation.add(telegramId);
-    await bot.sendMessage(chatId, format(t.messages.askMentorExplanation, {
-      min: MIN_EXPLANATION_LENGTH,
-      max: MAX_EXPLANATION_LENGTH,
-    }));
+    await bot.sendMessage(chatId, t.browse.noneAvailable);
+    await bot.sendMessage(chatId, format(t.messages.askMentorExplanation, { min: MIN_EXPLANATION_LENGTH, max: MAX_EXPLANATION_LENGTH }));
     return;
   }
 
-  const topMatches = relevantMatches.slice(0, 3);
-  let reply = t.messages.topMentorMatches + '\n';
-  const inlineKeyboard = topMatches.map((m) => [{ text: `${t.messages.requestButtonPrefix} ${m.name}`, callback_data: `request:${m.id}` }]);
-  for (const m of topMatches) {
-    const displaySkills = m.skills.map((s) => translateOption(t.locale, s, 'skill')).join(', ');
-    reply += `\n👤 ${m.name}\n${t.summary.skills}: ${displaySkills}\n${t.summary.experience}: ${format(t.summary.yearsLabel, { n: m.experienceYears })}\n${t.summary.location}: ${m.location || t.messages.notAvailable}\n${t.summary.language}: ${languageDisplayName(m.language)}\n`;
+  const browseState = mentorBrowseState.get(telegramId) ?? { page: 0 };
+  mentorBrowseState.set(telegramId, browseState);
+
+  // Ranked by relevance to the mentee's own profile as the default order —
+  // filters below narrow the list, they don't require a relevance match.
+  const ranked = findMentorMatches(
+    { name: user.menteeProfile.name, skillsNeeded: user.menteeProfile.skillsNeeded, experienceYears: user.menteeProfile.experienceYears, location: user.menteeProfile.location, language: user.menteeProfile.language },
+    allMentors.map((m) => ({ id: m.id, name: m.name, title: m.title, skills: m.skills, experienceYears: m.experienceYears, location: m.location, availability: m.availability, language: m.language }))
+  );
+
+  const countryById = new Map(allMentors.map((m) => [m.id, m.country]));
+  const filtered = ranked.filter((m) => {
+    if (browseState.language && m.language !== browseState.language) return false;
+    if (browseState.title && m.title !== browseState.title) return false;
+    if (browseState.country && countryById.get(m.id) !== browseState.country) return false;
+    return true;
+  });
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / MENTORS_PER_PAGE));
+  browseState.page = Math.min(Math.max(0, browseState.page), totalPages - 1);
+  const pageItems = filtered.slice(browseState.page * MENTORS_PER_PAGE, browseState.page * MENTORS_PER_PAGE + MENTORS_PER_PAGE);
+
+  let text = `${t.browse.header}\n`;
+  if (!filtered.length) {
+    text += `\n${t.browse.noneMatchFilters}`;
+  } else {
+    for (const m of pageItems) {
+      const displaySkills = m.skills.map((s) => translateOption(t.locale, s, 'skill')).join(', ') || t.messages.notAvailable;
+      const displayTitle = m.title ? translateOption(t.locale, m.title, 'title') : null;
+      text += `\n👤 ${m.name}`;
+      if (displayTitle) text += `\n${t.summary.title}: ${displayTitle}`;
+      text += `\n${t.summary.skills}: ${displaySkills}`;
+      text += `\n${t.summary.experience}: ${format(t.summary.yearsLabel, { n: m.experienceYears })}`;
+      text += `\n${t.summary.location}: ${m.location || t.messages.notAvailable}`;
+      text += `\n${t.summary.language}: ${languageDisplayName(m.language)}\n`;
+    }
+    text += `\n${format(t.browse.pageIndicator, { current: browseState.page + 1, total: totalPages })}`;
   }
-  await bot.sendMessage(chatId, reply, { reply_markup: { inline_keyboard: inlineKeyboard } });
+
+  const keyboard: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (const m of pageItems) {
+    keyboard.push([{ text: `${t.messages.requestButtonPrefix} ${m.name}`, callback_data: `request:${m.id}` }]);
+  }
+
+  const languageOptions = [...new Set(allMentors.map((m) => m.language))];
+  if (languageOptions.length > 1) {
+    keyboard.push([{ text: t.browse.filterLanguage, callback_data: 'noop' }]);
+    keyboard.push(languageOptions.map((code) => ({
+      text: `${browseState.language === code ? '✅ ' : ''}${languageDisplayName(code)}`,
+      callback_data: `browse_filter:language:${code}`,
+    })));
+  }
+  const titleOptions = [...new Set(allMentors.map((m) => m.title).filter((v): v is string => !!v))];
+  if (titleOptions.length > 0) {
+    keyboard.push([{ text: t.browse.filterTitle, callback_data: 'noop' }]);
+    for (let i = 0; i < titleOptions.length; i += 2) {
+      keyboard.push(titleOptions.slice(i, i + 2).map((title) => ({
+        text: `${browseState.title === title ? '✅ ' : ''}${translateOption(t.locale, title, 'title')}`,
+        callback_data: `browse_filter:title:${title}`,
+      })));
+    }
+  }
+  const countryOptions = [...new Set(allMentors.map((m) => m.country).filter((v): v is string => !!v))];
+  if (countryOptions.length > 0) {
+    keyboard.push([{ text: t.browse.filterCountry, callback_data: 'noop' }]);
+    for (let i = 0; i < countryOptions.length; i += 2) {
+      keyboard.push(countryOptions.slice(i, i + 2).map((country) => ({
+        text: `${browseState.country === country ? '✅ ' : ''}${translateOption(t.locale, country, 'country')}`,
+        callback_data: `browse_filter:country:${country}`,
+      })));
+    }
+  }
+
+  const navRow: Array<{ text: string; callback_data: string }> = [];
+  if (browseState.page > 0) navRow.push({ text: t.browse.prevPage, callback_data: 'browse_page:prev' });
+  if (browseState.page < totalPages - 1) navRow.push({ text: t.browse.nextPage, callback_data: 'browse_page:next' });
+  if (navRow.length) keyboard.push(navRow);
+
+  if (browseState.language || browseState.title || browseState.country) {
+    keyboard.push([{ text: t.browse.clearFilters, callback_data: 'browse_clear' }]);
+  }
+
+  keyboard.push([{ text: t.browse.cantFindButton, callback_data: 'browse_explain' }]);
+
+  const reply_markup = { inline_keyboard: keyboard };
+
+  if (browseState.messageId) {
+    try {
+      await bot.editMessageText(text, { chat_id: chatId, message_id: browseState.messageId, reply_markup });
+      return;
+    } catch { /* message may be gone — fall through and send a fresh one */ }
+  }
+  const sent = await bot.sendMessage(chatId, text, { reply_markup });
+  browseState.messageId = (sent as Message).message_id;
+}
+
+async function searchMentorsForMentee(chatId: number, telegramId: string) {
+  // Fresh search — reset any filters/page left over from a previous session.
+  mentorBrowseState.delete(telegramId);
+  await renderMentorBrowseList(chatId, telegramId);
 }
 
 type MenteeProfileForGroupPost = {
@@ -1191,6 +1280,56 @@ bot.on('callback_query', async (callbackQuery) => {
 
     await prisma.mentorProfile.update({ where: { id: mentorUser.mentorProfile.id }, data: { availability: false, busyUntil } });
     await bot.sendMessage(chatId, mt.messages.busySet);
+    return;
+  }
+
+  // ── Mentor browse: toggle a filter, page, clear filters, or "can't find" ──
+  if (data.startsWith('browse_filter:')) {
+    if (!chatId) return;
+    const rest = data.slice('browse_filter:'.length);
+    const sepIdx = rest.indexOf(':');
+    const dimension = rest.slice(0, sepIdx) as 'language' | 'title' | 'country';
+    const value = rest.slice(sepIdx + 1);
+    const browseState = mentorBrowseState.get(telegramId) ?? { page: 0 };
+    mentorBrowseState.set(telegramId, browseState);
+    browseState[dimension] = browseState[dimension] === value ? undefined : value;
+    browseState.page = 0;
+    await renderMentorBrowseList(chatId, telegramId);
+    return;
+  }
+
+  if (data === 'browse_clear') {
+    if (!chatId) return;
+    const browseState = mentorBrowseState.get(telegramId);
+    if (browseState) {
+      browseState.language = undefined;
+      browseState.title = undefined;
+      browseState.country = undefined;
+      browseState.page = 0;
+    }
+    await renderMentorBrowseList(chatId, telegramId);
+    return;
+  }
+
+  if (data.startsWith('browse_page:')) {
+    if (!chatId) return;
+    const direction = data.slice('browse_page:'.length);
+    const browseState = mentorBrowseState.get(telegramId);
+    if (browseState) {
+      browseState.page += direction === 'next' ? 1 : -1;
+      if (browseState.page < 0) browseState.page = 0;
+    }
+    await renderMentorBrowseList(chatId, telegramId);
+    return;
+  }
+
+  if (data === 'browse_explain') {
+    if (!chatId) return;
+    pendingMentorExplanation.add(telegramId);
+    await bot.sendMessage(chatId, format(t.messages.askMentorExplanation, {
+      min: MIN_EXPLANATION_LENGTH,
+      max: MAX_EXPLANATION_LENGTH,
+    }));
     return;
   }
 
