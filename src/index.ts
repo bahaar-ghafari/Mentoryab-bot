@@ -96,11 +96,17 @@ async function logProfileAudit(
 // ── Inline keyboard builders ──────────────────────────────────────────────────
 
 async function getSkillOptions(): Promise<string[]> {
-  const mentors = await prisma.mentorProfile.findMany({ select: { skills: true } });
-  const mentorSkills = [...new Set(mentors.flatMap((m) => m.skills))];
+  const [mentors, mentees] = await Promise.all([
+    prisma.mentorProfile.findMany({ select: { skills: true } }),
+    prisma.menteeProfile.findMany({ select: { skillsNeeded: true } }),
+  ]);
+  const seenSkills = [...new Set([
+    ...mentors.flatMap((m) => m.skills),
+    ...mentees.flatMap((m) => m.skillsNeeded),
+  ])];
   const base = SKILL_OPTIONS.filter((s) => s !== 'Other');
   const combined = [...base];
-  for (const s of mentorSkills) {
+  for (const s of seenSkills) {
     if (!combined.some((o) => canonicalizeSkill(o) === canonicalizeSkill(s))) {
       combined.push(s);
     }
