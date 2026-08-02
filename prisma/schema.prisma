@@ -47,6 +47,7 @@ model MentorProfile {
   city            String?
   location        String?
   availability    Boolean  @default(true)
+  busyUntil       DateTime?
   contactMethods  String[] @default([])
   telegramContact String?  @unique
   phoneContact    String?  @unique
@@ -72,6 +73,7 @@ model MenteeProfile {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   mentorshipRequests MentorshipRequest[]
+  mentorSearchRequests MentorSearchRequest[]
 }
 
 enum RequestStatus {
@@ -105,4 +107,17 @@ model ProfileAuditLog {
   actor      String
   snapshot   Json
   createdAt  DateTime    @default(now())
+}
+
+// A mentee's "couldn't auto-match" request posted to the mentors group. Stays
+// unclaimed until a mentor taps the claim button; re-posted weekly until then.
+model MentorSearchRequest {
+  id                  Int           @id @default(autoincrement())
+  menteeProfile       MenteeProfile @relation(fields: [menteeProfileId], references: [id], onDelete: Cascade)
+  menteeProfileId     Int
+  explanation         String
+  claimed             Boolean       @default(false)
+  claimedByTelegramId String?
+  lastPostedAt        DateTime      @default(now())
+  createdAt           DateTime      @default(now())
 }

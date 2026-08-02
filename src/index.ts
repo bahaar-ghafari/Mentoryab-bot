@@ -226,6 +226,27 @@ function buildMainMenuKeyboard(isMentor: boolean, hasProfile: boolean, isAdmin: 
   return { keyboard, resize_keyboard: true };
 }
 
+function buildBusyDurationKeyboard(t: Texts, includeAvailableNow = false) {
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  if (includeAvailableNow) {
+    rows.push([{ text: t.busyFlow.availableNow, callback_data: 'busy_set:available_now' }]);
+  }
+  rows.push([{ text: t.busyFlow.indefinite, callback_data: 'busy_set:indefinite' }]);
+  rows.push([{ text: t.busyFlow.askLater, callback_data: 'busy_set:later' }]);
+  rows.push([{ text: t.busyFlow.pickDate, callback_data: 'busy_set:pickdate' }]);
+  return { inline_keyboard: rows };
+}
+
+function buildBusyDatePresetsKeyboard(t: Texts) {
+  return {
+    inline_keyboard: [
+      [{ text: t.busyFlow.oneWeek, callback_data: 'busy_set:days:7' }, { text: t.busyFlow.twoWeeks, callback_data: 'busy_set:days:14' }],
+      [{ text: t.busyFlow.oneMonth, callback_data: 'busy_set:days:30' }, { text: t.busyFlow.threeMonths, callback_data: 'busy_set:days:90' }],
+      [{ text: t.ui.back, callback_data: 'busy_set:back' }],
+    ],
+  };
+}
+
 function calcExperienceYears(startDateStr: string): number {
   const [year, month] = startDateStr.split('-').map(Number);
   const now = new Date();
@@ -474,6 +495,11 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
   }
   if (!summaryShown) {
     await bot.sendMessage(chatId, readyText);
+  }
+
+  // Shown once, on first-time onboarding only — not on every profile edit.
+  if (isMentorNow && !hadProfileBefore) {
+    await bot.sendMessage(chatId, t.messages.mentorWelcome);
   }
 
   await bot.sendMessage(chatId, t.chooseRole, {
@@ -767,6 +793,40 @@ async function searchMentorsForMentee(chatId: number, telegramId: string) {
   await bot.sendMessage(chatId, reply, { reply_markup: { inline_keyboard: inlineKeyboard } });
 }
 
+type MenteeProfileForGroupPost = {
+  name: string;
+  skillsNeeded: string[];
+  experienceYears: number | null;
+  location: string | null;
+  language: string;
+};
+
+async function postMentorSearchRequestToGroup(
+  requestId: number,
+  menteeProfile: MenteeProfileForGroupPost,
+  explanation: string,
+  isReminder = false
+) {
+  const groupChatId = process.env.MENTORS_GROUP_CHAT_ID;
+  if (!groupChatId) {
+    console.error('MENTORS_GROUP_CHAT_ID is not set — skipping group post. Run /groupid in the target group to get its ID.');
+    return;
+  }
+  const t = getTexts(menteeProfile.language);
+  const body = format(t.messages.mentorSearchGroupPost, {
+    menteeName: menteeProfile.name,
+    skills: menteeProfile.skillsNeeded.join(', ') || t.messages.notAvailable,
+    experience: menteeProfile.experienceYears ?? 0,
+    location: menteeProfile.location || t.messages.notAvailable,
+    language: languageDisplayName(menteeProfile.language),
+    explanation,
+  });
+  const post = isReminder ? `${t.messages.reminderBumpPrefix}\n\n${body}` : body;
+  await bot.sendMessage(Number(groupChatId), post, {
+    reply_markup: { inline_keyboard: [[{ text: t.messages.claimButtonText, callback_data: `claim_search:${requestId}` }]] },
+  }).catch((err) => console.error('Failed to post to mentors group:', err));
+}
+
 async function handleMentorExplanationText(msg: Message) {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
@@ -786,21 +846,10 @@ async function handleMentorExplanationText(msg: Message) {
   pendingMentorExplanation.delete(telegramId);
   if (!user?.menteeProfile) return;
 
-  const groupPost = format(t.messages.mentorSearchGroupPost, {
-    menteeName: user.menteeProfile.name,
-    skills: user.menteeProfile.skillsNeeded.join(', ') || t.messages.notAvailable,
-    experience: user.menteeProfile.experienceYears ?? 0,
-    location: user.menteeProfile.location || t.messages.notAvailable,
-    language: languageDisplayName(user.menteeProfile.language),
-    explanation: text,
+  const request = await prisma.mentorSearchRequest.create({
+    data: { menteeProfileId: user.menteeProfile.id, explanation: text },
   });
-
-  const groupChatId = process.env.MENTORS_GROUP_CHAT_ID;
-  if (groupChatId) {
-    await bot.sendMessage(Number(groupChatId), groupPost).catch((err) => console.error('Failed to post to mentors group:', err));
-  } else {
-    console.error('MENTORS_GROUP_CHAT_ID is not set — skipping group post. Run /groupid in the target group to get its ID.');
-  }
+  await postMentorSearchRequestToGroup(request.id, user.menteeProfile, text);
 
   for (const adminId of adminIds) {
     const adminUser = await prisma.user.findUnique({ where: { telegramId: adminId } });
@@ -822,8 +871,7 @@ const handleSetBusy = async (msg: Message) => {
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
   const t = getTexts(user?.language);
   if (!user?.mentorProfile) { await bot.sendMessage(msg.chat.id, t.messages.needMentorProfile); return; }
-  await prisma.mentorProfile.update({ where: { id: user.mentorProfile.id }, data: { availability: false } });
-  await bot.sendMessage(msg.chat.id, t.messages.busySet);
+  await bot.sendMessage(msg.chat.id, t.busyFlow.prompt, { reply_markup: buildBusyDurationKeyboard(t) });
 };
 
 const handleSetAvailable = async (msg: Message) => {
@@ -831,7 +879,7 @@ const handleSetAvailable = async (msg: Message) => {
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
   const t = getTexts(user?.language);
   if (!user?.mentorProfile) { await bot.sendMessage(msg.chat.id, t.messages.needMentorProfile); return; }
-  await prisma.mentorProfile.update({ where: { id: user.mentorProfile.id }, data: { availability: true } });
+  await prisma.mentorProfile.update({ where: { id: user.mentorProfile.id }, data: { availability: true, busyUntil: null } });
   await bot.sendMessage(msg.chat.id, t.messages.availableSet);
 };
 
@@ -942,6 +990,81 @@ bot.on('callback_query', async (callbackQuery) => {
         reply_markup: { inline_keyboard: [] },
       }).catch(() => {});
     }
+    return;
+  }
+
+  // ── Mentor claims an unmatched mentee's search request from the group ──
+  if (data.startsWith('claim_search:')) {
+    if (!chatId) return;
+    const requestId = Number(data.slice('claim_search:'.length));
+    const request = await prisma.mentorSearchRequest.findUnique({
+      where: { id: requestId },
+      include: { menteeProfile: { include: { user: true } } },
+    });
+    if (!request) return;
+
+    if (request.claimed) {
+      await bot.answerCallbackQuery(callbackQuery.id, { text: 'Already claimed', show_alert: true }).catch(() => {});
+      return;
+    }
+
+    await prisma.mentorSearchRequest.update({
+      where: { id: requestId },
+      data: { claimed: true, claimedByTelegramId: telegramId },
+    });
+
+    const menteeT = getTexts(request.menteeProfile.user.language);
+    await bot.sendMessage(Number(request.menteeProfile.user.telegramId), menteeT.messages.mentorClaimedNotification).catch(() => {});
+
+    const messageId = callbackQuery.message?.message_id;
+    if (messageId) {
+      const groupT = getTexts(request.menteeProfile.language);
+      await bot.editMessageReplyMarkup(
+        { inline_keyboard: [[{ text: groupT.messages.claimedMarker, callback_data: 'noop' }]] },
+        { chat_id: chatId, message_id: messageId }
+      ).catch(() => {});
+    }
+    return;
+  }
+
+  // ── Busy duration selection (Set Busy flow, or the busy-reminder prompt) ──
+  if (data.startsWith('busy_set:')) {
+    if (!chatId) return;
+    const mentorUser = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
+    if (!mentorUser?.mentorProfile) return;
+    const mt = getTexts(mentorUser.language);
+    const action = data.slice('busy_set:'.length);
+    const messageId = callbackQuery.message?.message_id;
+
+    if (action === 'pickdate') {
+      if (messageId) {
+        await bot.editMessageText(mt.busyFlow.prompt, { chat_id: chatId, message_id: messageId, reply_markup: buildBusyDatePresetsKeyboard(mt) }).catch(() => {});
+      }
+      return;
+    }
+    if (action === 'back') {
+      if (messageId) {
+        await bot.editMessageText(mt.busyFlow.prompt, { chat_id: chatId, message_id: messageId, reply_markup: buildBusyDurationKeyboard(mt) }).catch(() => {});
+      }
+      return;
+    }
+    if (action === 'available_now') {
+      await prisma.mentorProfile.update({ where: { id: mentorUser.mentorProfile.id }, data: { availability: true, busyUntil: null } });
+      await bot.sendMessage(chatId, mt.messages.availableSet);
+      return;
+    }
+
+    let busyUntil: Date | null = null;
+    if (action === 'later') {
+      busyUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    } else if (action.startsWith('days:')) {
+      const days = Number(action.slice('days:'.length));
+      busyUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+    }
+    // action === 'indefinite' leaves busyUntil as null — no scheduled reminder
+
+    await prisma.mentorProfile.update({ where: { id: mentorUser.mentorProfile.id }, data: { availability: false, busyUntil } });
+    await bot.sendMessage(chatId, mt.messages.busySet);
     return;
   }
 
@@ -1297,5 +1420,44 @@ bot.on('message', async (msg: Message) => {
   if (!nextStep) { await finishOnboarding(chatId, telegramId, state); return; }
   await showStep(chatId, nextStep, state.role, telegramId);
 });
+
+// ── Background schedulers ─────────────────────────────────────────────────────
+
+const BUSY_REMINDER_CHECK_INTERVAL_MS = 60 * 60 * 1000; // hourly
+const STALE_SEARCH_REQUEST_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
+const STALE_SEARCH_REQUEST_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 1 week
+
+async function checkBusyReminders() {
+  const dueMentors = await prisma.mentorProfile.findMany({
+    where: { availability: false, busyUntil: { lte: new Date() } },
+    include: { user: true },
+  });
+  for (const mentor of dueMentors) {
+    const t = getTexts(mentor.language);
+    await bot.sendMessage(Number(mentor.user.telegramId), t.busyFlow.reminderPrompt, {
+      reply_markup: buildBusyDurationKeyboard(t, true),
+    }).catch((err) => console.error('Failed to send busy reminder:', err));
+    // Clear busyUntil so this mentor isn't re-prompted on every check until they respond.
+    await prisma.mentorProfile.update({ where: { id: mentor.id }, data: { busyUntil: null } });
+  }
+}
+
+async function checkUnclaimedMentorSearchRequests() {
+  const staleCutoff = new Date(Date.now() - STALE_SEARCH_REQUEST_AGE_MS);
+  const staleRequests = await prisma.mentorSearchRequest.findMany({
+    where: { claimed: false, lastPostedAt: { lte: staleCutoff } },
+    include: { menteeProfile: true },
+  });
+  for (const request of staleRequests) {
+    await postMentorSearchRequestToGroup(request.id, request.menteeProfile, request.explanation, true);
+    await prisma.mentorSearchRequest.update({ where: { id: request.id }, data: { lastPostedAt: new Date() } });
+  }
+}
+
+setInterval(() => { checkBusyReminders().catch((err) => console.error('checkBusyReminders failed:', err)); }, BUSY_REMINDER_CHECK_INTERVAL_MS);
+setInterval(() => { checkUnclaimedMentorSearchRequests().catch((err) => console.error('checkUnclaimedMentorSearchRequests failed:', err)); }, STALE_SEARCH_REQUEST_CHECK_INTERVAL_MS);
+// Also run shortly after startup, in case reminders were due while the bot was down.
+setTimeout(() => { checkBusyReminders().catch((err) => console.error('checkBusyReminders failed:', err)); }, 30_000);
+setTimeout(() => { checkUnclaimedMentorSearchRequests().catch((err) => console.error('checkUnclaimedMentorSearchRequests failed:', err)); }, 30_000);
 
 app.listen(port, () => console.log(`Server listening on port ${port}`));
