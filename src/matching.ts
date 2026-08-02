@@ -1,6 +1,7 @@
 export type MentorProfileLike = {
   id: number;
   name: string;
+  title: string | null;
   skills: string[];
   experienceYears: number;
   location: string | null;
@@ -23,8 +24,43 @@ export function normalizeSkills(skills: string[]): string[] {
     .filter(Boolean);
 }
 
+// Known shorthand a mentee might type (e.g. "FF") that wouldn't otherwise match a
+// mentor's canonical skill/title (e.g. "Frontend Engineer"). Keys and values are
+// compared in already-normalized (trimmed, lowercased) form.
+const SKILL_ABBREVIATIONS: Record<string, string> = {
+  ff: 'frontend engineer',
+  fe: 'frontend engineer',
+  frontend: 'frontend engineer',
+  be: 'backend engineer',
+  backend: 'backend engineer',
+  fs: 'full stack engineer',
+  fullstack: 'full stack engineer',
+  pm: 'product manager',
+  em: 'engineering manager',
+  ds: 'data scientist',
+  ml: 'ai / ml',
+  ai: 'ai / ml',
+  ux: 'ux/ui designer',
+  ui: 'ux/ui designer',
+  devops: 'devops engineer',
+  cto: 'cto / vp engineering',
+  vp: 'cto / vp engineering',
+};
+
+// Expands each normalized term with any known abbreviation match, so a mentee
+// searching for "ff" also matches mentors tagged/titled "Frontend Engineer".
+// Keeps the original term too, since not every input is a known shorthand.
+export function expandAbbreviations(normalizedTerms: string[]): string[] {
+  const expanded = new Set(normalizedTerms);
+  for (const term of normalizedTerms) {
+    const mapped = SKILL_ABBREVIATIONS[term];
+    if (mapped) expanded.add(mapped);
+  }
+  return [...expanded];
+}
+
 export function findMentorMatches(mentee: MenteeProfileLike, mentors: MentorProfileLike[]) {
-  const menteeSkills = normalizeSkills(mentee.skillsNeeded);
+  const menteeSkills = expandAbbreviations(normalizeSkills(mentee.skillsNeeded));
   const menteeLocation = mentee.location?.trim().toLowerCase() || '';
   const menteeExperience = mentee.experienceYears ?? 0;
 
@@ -32,13 +68,16 @@ export function findMentorMatches(mentee: MenteeProfileLike, mentors: MentorProf
     .filter((mentor) => mentor.availability)
     .map((mentor) => {
       const mentorSkills = normalizeSkills(mentor.skills);
-      const overlap = mentorSkills.filter((skill) => menteeSkills.includes(skill)).length;
+      const mentorTitle = mentor.title ? normalizeSkills([mentor.title]) : [];
+      const overlap =
+        mentorSkills.filter((skill) => menteeSkills.includes(skill)).length +
+        mentorTitle.filter((title) => menteeSkills.includes(title)).length;
       const locationBonus = menteeLocation && mentor.location?.trim().toLowerCase() === menteeLocation ? 2 : 0;
       const experienceBonus = menteeExperience > 0 ? Math.max(0, 2 - Math.abs(mentor.experienceYears - menteeExperience)) : 0;
       const languageBonus = mentor.language === mentee.language ? 2 : 0;
       const score = overlap * 3 + locationBonus + experienceBonus + languageBonus;
 
-      return { ...mentor, score };
+      return { ...mentor, score, overlap };
     })
     .sort((a, b) => b.score - a.score);
 }

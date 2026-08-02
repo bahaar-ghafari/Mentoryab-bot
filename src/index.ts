@@ -473,6 +473,12 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
   await bot.sendMessage(chatId, t.chooseRole, {
     reply_markup: buildMainMenuKeyboard(isMentorNow, true, adminIds.has(telegramId), t),
   });
+
+  // A mentee finishing onboarding almost certainly wants to see matches right
+  // away rather than tapping Find Mentor again immediately afterward.
+  if (!isMentorNow) {
+    await searchMentorsForMentee(chatId, telegramId);
+  }
 }
 
 // ── Express & bot setup ───────────────────────────────────────────────────────
@@ -487,6 +493,15 @@ app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
 bot.onText(/\/myid/, async (msg: Message) => {
   await bot.sendMessage(msg.chat.id, `Your Telegram ID: ${msg.from?.id}`);
+});
+
+// Run this inside the target group (with the bot already a member) to get the
+// numeric chat ID needed for MENTORS_GROUP_CHAT_ID — invite links can't be
+// resolved to a chat ID via the Bot API.
+bot.onText(/^\/groupid$/, async (msg: Message) => {
+  const telegramId = String(msg.from?.id);
+  if (!adminIds.has(telegramId)) return;
+  await bot.sendMessage(msg.chat.id, `Chat ID: ${msg.chat.id}`);
 });
 
 bot.onText(/\/mentors/, async (msg: Message) => {
@@ -690,14 +705,25 @@ const startMenteeOnboarding = async (msg: Message) => {
   await showStep(chatId, 'language', 'mentee', telegramId);
 };
 
+const startOrSearchMentee = async (msg: Message) => {
+  const telegramId = String(msg.from?.id);
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { menteeProfile: true } });
+  if (user?.menteeProfile) { await searchMentorsForMentee(msg.chat.id, telegramId); return; }
+  await startMenteeOnboarding(msg);
+};
+
 bot.onText(menuButtonRegex('joinMentors'), startMentorOnboarding);
-bot.onText(menuButtonRegex('needMentor'), startMenteeOnboarding);
+bot.onText(menuButtonRegex('needMentor'), startOrSearchMentee);
 
 // ── Menu action handlers ──────────────────────────────────────────────────────
 
-const handleMatchRequest = async (msg: Message) => {
-  const chatId = msg.chat.id;
-  const telegramId = String(msg.from?.id);
+const MIN_EXPLANATION_LENGTH = 50;
+const MAX_EXPLANATION_LENGTH = 500;
+// telegramIds currently being asked to explain what kind of mentor they need,
+// after an automatic search found nobody with a relevant skill/title.
+const pendingMentorExplanation = new Set<string>();
+
+async function searchMentorsForMentee(chatId: number, telegramId: string) {
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { menteeProfile: true } });
   const t = getTexts(user?.language);
 
@@ -706,26 +732,26 @@ const handleMatchRequest = async (msg: Message) => {
   const mentors = await prisma.mentorProfile.findMany({ where: { availability: true } });
   const matches = findMentorMatches(
     { name: user.menteeProfile.name, skillsNeeded: user.menteeProfile.skillsNeeded, experienceYears: user.menteeProfile.experienceYears, location: user.menteeProfile.location, language: user.menteeProfile.language },
-    mentors.map((m) => ({ id: m.id, name: m.name, skills: m.skills, experienceYears: m.experienceYears, location: m.location, availability: m.availability, language: m.language }))
+    mentors.map((m) => ({ id: m.id, name: m.name, title: m.title, skills: m.skills, experienceYears: m.experienceYears, location: m.location, availability: m.availability, language: m.language }))
   );
 
-  if (!matches.length) {
+  // Every available mentor is always returned by findMentorMatches (it only
+  // sorts, never filters by relevance), so "no options" means none of them
+  // share any skill/title with what this mentee is looking for — not
+  // literally zero mentors registered.
+  const relevantMatches = matches.filter((m) => m.overlap > 0);
+
+  if (!relevantMatches.length) {
     await bot.sendMessage(chatId, t.messages.noMentorsAvailable);
-    for (const adminId of adminIds) {
-      const adminUser = await prisma.user.findUnique({ where: { telegramId: adminId } });
-      const at = getTexts(adminUser?.language);
-      const notification = format(at.messages.manualMatchNeeded, {
-        menteeName: user.menteeProfile.name,
-        skills: user.menteeProfile.skillsNeeded.join(', ') || at.messages.notAvailable,
-        experience: user.menteeProfile.experienceYears ?? 0,
-        location: user.menteeProfile.location || at.messages.notAvailable,
-      });
-      await bot.sendMessage(Number(adminId), notification).catch(() => {});
-    }
+    pendingMentorExplanation.add(telegramId);
+    await bot.sendMessage(chatId, format(t.messages.askMentorExplanation, {
+      min: MIN_EXPLANATION_LENGTH,
+      max: MAX_EXPLANATION_LENGTH,
+    }));
     return;
   }
 
-  const topMatches = matches.slice(0, 3);
+  const topMatches = relevantMatches.slice(0, 3);
   let reply = t.messages.topMentorMatches + '\n';
   const inlineKeyboard = topMatches.map((m) => [{ text: `${t.messages.requestButtonPrefix} ${m.name}`, callback_data: `request:${m.id}` }]);
   for (const m of topMatches) {
@@ -733,7 +759,57 @@ const handleMatchRequest = async (msg: Message) => {
     reply += `\n👤 ${m.name}\n${t.summary.skills}: ${displaySkills}\n${t.summary.experience}: ${format(t.summary.yearsLabel, { n: m.experienceYears })}\n${t.summary.location}: ${m.location || t.messages.notAvailable}\n${t.summary.language}: ${languageDisplayName(m.language)}\n`;
   }
   await bot.sendMessage(chatId, reply, { reply_markup: { inline_keyboard: inlineKeyboard } });
-};
+}
+
+async function handleMentorExplanationText(msg: Message) {
+  const chatId = msg.chat.id;
+  const telegramId = String(msg.from?.id);
+  const text = (msg.text || '').trim();
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { menteeProfile: true } });
+  const t = getTexts(user?.language);
+
+  if (text.length < MIN_EXPLANATION_LENGTH) {
+    await bot.sendMessage(chatId, format(t.messages.explanationTooShort, { min: MIN_EXPLANATION_LENGTH, current: text.length }));
+    return;
+  }
+  if (text.length > MAX_EXPLANATION_LENGTH) {
+    await bot.sendMessage(chatId, format(t.messages.explanationTooLong, { max: MAX_EXPLANATION_LENGTH, current: text.length }));
+    return;
+  }
+
+  pendingMentorExplanation.delete(telegramId);
+  if (!user?.menteeProfile) return;
+
+  const groupPost = format(t.messages.mentorSearchGroupPost, {
+    menteeName: user.menteeProfile.name,
+    skills: user.menteeProfile.skillsNeeded.join(', ') || t.messages.notAvailable,
+    experience: user.menteeProfile.experienceYears ?? 0,
+    location: user.menteeProfile.location || t.messages.notAvailable,
+    language: languageDisplayName(user.menteeProfile.language),
+    explanation: text,
+  });
+
+  const groupChatId = process.env.MENTORS_GROUP_CHAT_ID;
+  if (groupChatId) {
+    await bot.sendMessage(Number(groupChatId), groupPost).catch((err) => console.error('Failed to post to mentors group:', err));
+  } else {
+    console.error('MENTORS_GROUP_CHAT_ID is not set — skipping group post. Run /groupid in the target group to get its ID.');
+  }
+
+  for (const adminId of adminIds) {
+    const adminUser = await prisma.user.findUnique({ where: { telegramId: adminId } });
+    const at = getTexts(adminUser?.language);
+    const notification = format(at.messages.manualMatchNeeded, {
+      menteeName: user.menteeProfile.name,
+      skills: user.menteeProfile.skillsNeeded.join(', ') || at.messages.notAvailable,
+      experience: user.menteeProfile.experienceYears ?? 0,
+      location: user.menteeProfile.location || at.messages.notAvailable,
+    });
+    await bot.sendMessage(Number(adminId), notification).catch(() => {});
+  }
+
+  await bot.sendMessage(chatId, t.messages.explanationSentConfirmation);
+}
 
 const handleSetBusy = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
@@ -1127,6 +1203,7 @@ bot.on('message', async (msg: Message) => {
   const state = userStates.get(telegramId);
 
   if (!state) {
+    if (pendingMentorExplanation.has(telegramId)) { await handleMentorExplanationText(msg); return; }
     if (matchesMenuButton(text, 'busy')) { await handleSetBusy(msg); return; }
     if (matchesMenuButton(text, 'available')) { await handleSetAvailable(msg); return; }
     if (matchesMenuButton(text, 'editProfile')) { await handleEditProfile(msg); return; }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { findMentorMatches, normalizeSkills } from './matching.js';
+import { findMentorMatches, normalizeSkills, expandAbbreviations } from './matching.js';
 import type { MenteeProfileLike, MentorProfileLike } from './matching.js';
 
 describe('normalizeSkills', () => {
@@ -30,6 +30,7 @@ describe('findMentorMatches', () => {
   };
 
   const baseMentor: Omit<MentorProfileLike, 'id' | 'name'> = {
+    title: null,
     skills: [],
     experienceYears: 0,
     location: null,
@@ -93,5 +94,40 @@ describe('findMentorMatches', () => {
 
   it('returns an empty array when there are no mentors', () => {
     expect(findMentorMatches(mentee, [])).toEqual([]);
+  });
+
+  it('matches on mentor title, not just skills', () => {
+    const menteeLookingForFrontend: MenteeProfileLike = { ...mentee, skillsNeeded: ['Frontend Engineer'] };
+    const mentors: MentorProfileLike[] = [
+      { id: 1, name: 'Has the title, no matching skill', ...baseMentor, title: 'Frontend Engineer', skills: ['Leadership'] },
+      { id: 2, name: 'No title, no matching skill', ...baseMentor, title: null, skills: ['Leadership'] },
+    ];
+    const results = findMentorMatches(menteeLookingForFrontend, mentors);
+    expect(results[0].id).toBe(1);
+    expect(results[0].overlap).toBe(1);
+    expect(results[1].overlap).toBe(0);
+  });
+
+  it('exposes overlap so callers can distinguish a real skill/title match from a bonus-only match', () => {
+    const mentors: MentorProfileLike[] = [
+      { id: 1, name: 'No skill overlap, same city', ...baseMentor, skills: ['Design'], location: 'Berlin' },
+    ];
+    const [match] = findMentorMatches(mentee, mentors);
+    expect(match.overlap).toBe(0);
+    expect(match.score).toBeGreaterThan(0); // location/language bonuses still apply
+  });
+});
+
+describe('expandAbbreviations', () => {
+  it('adds the canonical term for a known abbreviation', () => {
+    expect(expandAbbreviations(['ff'])).toEqual(['ff', 'frontend engineer']);
+  });
+
+  it('keeps unknown terms unchanged with no expansion', () => {
+    expect(expandAbbreviations(['react'])).toEqual(['react']);
+  });
+
+  it('deduplicates when the expansion is already present', () => {
+    expect(expandAbbreviations(['fe', 'frontend engineer'])).toEqual(['fe', 'frontend engineer']);
   });
 });
