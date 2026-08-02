@@ -6,7 +6,7 @@ import { findMentorMatches, canonicalizeSkill } from './matching.js';
 import { getTexts, LOCALE_TEXTS, LANGUAGE_CHOICES, isLocale, type Locale, type Texts } from './i18n/index.js';
 import { translateOption, getContactLabels } from './i18n/labels.js';
 import { SKILL_OPTIONS } from './i18n/options.js';
-import { matchesMenuButton, menuButtonRegex } from './i18n/menuButtons.js';
+import { matchesMenuButton } from './i18n/menuButtons.js';
 import {
   ContactType,
   CONTACT_LABELS,
@@ -744,9 +744,6 @@ const startOrSearchMentee = async (msg: Message) => {
   await startMenteeOnboarding(msg);
 };
 
-bot.onText(menuButtonRegex('joinMentors'), startMentorOnboarding);
-bot.onText(menuButtonRegex('needMentor'), startOrSearchMentee);
-
 // ── Menu action handlers ──────────────────────────────────────────────────────
 
 const MIN_EXPLANATION_LENGTH = 50;
@@ -774,7 +771,6 @@ async function searchMentorsForMentee(chatId: number, telegramId: string) {
   const relevantMatches = matches.filter((m) => m.overlap > 0);
 
   if (!relevantMatches.length) {
-    await bot.sendMessage(chatId, t.messages.noMentorsAvailable);
     pendingMentorExplanation.add(telegramId);
     await bot.sendMessage(chatId, format(t.messages.askMentorExplanation, {
       min: MIN_EXPLANATION_LENGTH,
@@ -1323,25 +1319,51 @@ bot.on('callback_query', async (callbackQuery) => {
 
 // ── Text message handler ──────────────────────────────────────────────────────
 
+// Checked before anything else on every incoming text message: tapping any
+// main-menu button always cancels whatever was in progress (onboarding, the
+// busy-duration prompt, the mentor-search explanation) and starts fresh with
+// the new command, rather than being swallowed as raw input for the old flow.
+// Become Mentor / Find Mentor used to be separate bot.onText listeners that
+// fired independently of (and could race with) this handler — consolidated
+// here so there's exactly one place that decides what a button tap does.
+const MENU_ACTIONS: Array<[keyof Texts['startMenu'], (msg: Message) => Promise<void>]> = [
+  ['joinMentors', startMentorOnboarding],
+  ['needMentor', startOrSearchMentee],
+  ['busy', handleSetBusy],
+  ['available', handleSetAvailable],
+  ['editProfile', handleEditProfile],
+  ['help', handleHelp],
+  ['adminMentors', handleAdminMentorsList],
+  ['adminMentees', handleAdminMenteesList],
+  ['adminRestart', handleAdminRestart],
+];
+
+function findMenuAction(text: string): ((msg: Message) => Promise<void>) | null {
+  for (const [key, handler] of MENU_ACTIONS) {
+    if (matchesMenuButton(text, key)) return handler;
+  }
+  return null;
+}
+
 bot.on('message', async (msg: Message) => {
   if (!msg.text || msg.text.startsWith('/')) return;
 
   const text = msg.text;
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
-  const state = userStates.get(telegramId);
 
-  if (!state) {
-    if (pendingMentorExplanation.has(telegramId)) { await handleMentorExplanationText(msg); return; }
-    if (matchesMenuButton(text, 'busy')) { await handleSetBusy(msg); return; }
-    if (matchesMenuButton(text, 'available')) { await handleSetAvailable(msg); return; }
-    if (matchesMenuButton(text, 'editProfile')) { await handleEditProfile(msg); return; }
-    if (matchesMenuButton(text, 'help')) { await handleHelp(msg); return; }
-    if (matchesMenuButton(text, 'adminMentors')) { await handleAdminMentorsList(msg); return; }
-    if (matchesMenuButton(text, 'adminMentees')) { await handleAdminMenteesList(msg); return; }
-    if (matchesMenuButton(text, 'adminRestart')) { await handleAdminRestart(msg); return; }
+  const menuAction = findMenuAction(text);
+  if (menuAction) {
+    userStates.delete(telegramId);
+    pendingMentorExplanation.delete(telegramId);
+    await menuAction(msg);
     return;
   }
+
+  if (pendingMentorExplanation.has(telegramId)) { await handleMentorExplanationText(msg); return; }
+
+  const state = userStates.get(telegramId);
+  if (!state) return;
 
   const t = getTexts(state.language);
 
