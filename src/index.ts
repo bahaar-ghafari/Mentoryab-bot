@@ -882,16 +882,55 @@ const MAX_EXPLANATION_LENGTH = 500;
 // after an automatic search found nobody with a relevant skill/title.
 const pendingMentorExplanation = new Set<string>();
 
+type BrowseFilterDimension = 'language' | 'title' | 'country';
+
 interface MentorBrowseState {
   language?: string;
   title?: string;
   country?: string;
   page: number;
   messageId?: number;
+  // Which sub-screen is currently shown in the same (edited-in-place) message.
+  view: 'list' | 'filterMenu' | 'filterValues';
+  filterDimension?: BrowseFilterDimension;
 }
 const mentorBrowseState = new Map<string, MentorBrowseState>();
 const MENTORS_PER_PAGE = 5;
 
+function getBrowseState(telegramId: string): MentorBrowseState {
+  let state = mentorBrowseState.get(telegramId);
+  if (!state) {
+    state = { page: 0, view: 'list' };
+    mentorBrowseState.set(telegramId, state);
+  }
+  return state;
+}
+
+async function sendBrowseView(chatId: number, telegramId: string, text: string, reply_markup: TelegramBot.InlineKeyboardMarkup) {
+  const browseState = getBrowseState(telegramId);
+  if (browseState.messageId) {
+    try {
+      await bot.editMessageText(text, { chat_id: chatId, message_id: browseState.messageId, reply_markup });
+      return;
+    } catch { /* message may be gone — fall through and send a fresh one */ }
+  }
+  const sent = await bot.sendMessage(chatId, text, { reply_markup });
+  browseState.messageId = (sent as Message).message_id;
+}
+
+function buildActiveFiltersSummary(browseState: MentorBrowseState, t: Texts): { labels: string[]; text: string } {
+  const labels: string[] = [];
+  if (browseState.language) labels.push(`🌐 ${languageDisplayName(browseState.language)}`);
+  if (browseState.title) labels.push(`💼 ${translateOption(t.locale, browseState.title, 'title')}`);
+  if (browseState.country) labels.push(`🌍 ${translateOption(t.locale, browseState.country, 'country')}`);
+  const text = labels.length ? format(t.browse.activeFilters, { filters: labels.join(', ') }) : t.browse.noFiltersApplied;
+  return { labels, text };
+}
+
+// Compact results view: just the matching mentors + pagination + a single
+// "Filters" button (showing how many are active) instead of every filter
+// option inline — keeps the keyboard short regardless of how many distinct
+// languages/titles/countries exist among available mentors.
 async function renderMentorBrowseList(chatId: number, telegramId: string) {
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { menteeProfile: true } });
   const t = getTexts(user?.language);
@@ -906,11 +945,9 @@ async function renderMentorBrowseList(chatId: number, telegramId: string) {
     return;
   }
 
-  const browseState = mentorBrowseState.get(telegramId) ?? { page: 0 };
-  mentorBrowseState.set(telegramId, browseState);
+  const browseState = getBrowseState(telegramId);
+  browseState.view = 'list';
 
-  // Ranked by relevance to the mentee's own profile as the default order —
-  // filters below narrow the list, they don't require a relevance match.
   const ranked = findMentorMatches(
     { name: user.menteeProfile.name, skillsNeeded: user.menteeProfile.skillsNeeded, experienceYears: user.menteeProfile.experienceYears, location: user.menteeProfile.location, language: user.menteeProfile.language },
     allMentors.map((m) => ({ id: m.id, name: m.name, title: m.title, skills: m.skills, experienceYears: m.experienceYears, location: m.location, availability: m.availability, language: m.language }))
@@ -928,13 +965,7 @@ async function renderMentorBrowseList(chatId: number, telegramId: string) {
   browseState.page = Math.min(Math.max(0, browseState.page), totalPages - 1);
   const pageItems = filtered.slice(browseState.page * MENTORS_PER_PAGE, browseState.page * MENTORS_PER_PAGE + MENTORS_PER_PAGE);
 
-  const activeFilterLabels: string[] = [];
-  if (browseState.language) activeFilterLabels.push(`🌐 ${languageDisplayName(browseState.language)}`);
-  if (browseState.title) activeFilterLabels.push(`💼 ${translateOption(t.locale, browseState.title, 'title')}`);
-  if (browseState.country) activeFilterLabels.push(`🌍 ${translateOption(t.locale, browseState.country, 'country')}`);
-  const filtersSummary = activeFilterLabels.length
-    ? format(t.browse.activeFilters, { filters: activeFilterLabels.join(', ') })
-    : t.browse.noFiltersApplied;
+  const { labels: activeFilterLabels, text: filtersSummary } = buildActiveFiltersSummary(browseState, t);
 
   let text = `${t.browse.header}\n\n${filtersSummary}\n`;
   if (!filtered.length) {
@@ -954,67 +985,83 @@ async function renderMentorBrowseList(chatId: number, telegramId: string) {
     text += `\n${format(t.browse.pageIndicator, { current: browseState.page + 1, total: totalPages })}`;
   }
 
-  // Keyboard is ordered to match how someone would actually use it: narrow
-  // down with filters first, then see matching results, then page/escalate.
   const keyboard: Array<Array<{ text: string; callback_data: string }>> = [];
-
-  const languageOptions = [...new Set(allMentors.map((m) => m.language))];
-  if (languageOptions.length > 1) {
-    keyboard.push([{ text: t.browse.filterLanguageDivider, callback_data: 'noop' }]);
-    keyboard.push(languageOptions.map((code) => ({
-      text: `${browseState.language === code ? '✅ ' : ''}${languageDisplayName(code)}`,
-      callback_data: `browse_filter:language:${code}`,
-    })));
-  }
-  const titleOptions = [...new Set(allMentors.map((m) => m.title).filter((v): v is string => !!v))];
-  if (titleOptions.length > 0) {
-    keyboard.push([{ text: t.browse.filterTitleDivider, callback_data: 'noop' }]);
-    for (let i = 0; i < titleOptions.length; i += 2) {
-      keyboard.push(titleOptions.slice(i, i + 2).map((title) => ({
-        text: `${browseState.title === title ? '✅ ' : ''}${translateOption(t.locale, title, 'title')}`,
-        callback_data: `browse_filter:title:${title}`,
-      })));
-    }
-  }
-  const countryOptions = [...new Set(allMentors.map((m) => m.country).filter((v): v is string => !!v))];
-  if (countryOptions.length > 0) {
-    keyboard.push([{ text: t.browse.filterCountryDivider, callback_data: 'noop' }]);
-    for (let i = 0; i < countryOptions.length; i += 2) {
-      keyboard.push(countryOptions.slice(i, i + 2).map((country) => ({
-        text: `${browseState.country === country ? '✅ ' : ''}${translateOption(t.locale, country, 'country')}`,
-        callback_data: `browse_filter:country:${country}`,
-      })));
-    }
-  }
-  if (browseState.language || browseState.title || browseState.country) {
-    keyboard.push([{ text: t.browse.clearFilters, callback_data: 'browse_clear' }]);
-  }
-
-  if (pageItems.length) {
-    keyboard.push([{ text: t.browse.resultsDivider, callback_data: 'noop' }]);
-    pageItems.forEach((m, idx) => {
-      const num = browseState.page * MENTORS_PER_PAGE + idx + 1;
-      keyboard.push([{ text: `${num}. ${t.messages.requestButtonPrefix}`, callback_data: `request:${m.id}` }]);
-    });
-  }
+  pageItems.forEach((m, idx) => {
+    const num = browseState.page * MENTORS_PER_PAGE + idx + 1;
+    keyboard.push([{ text: `${num}. ${t.messages.requestButtonPrefix}`, callback_data: `request:${m.id}` }]);
+  });
 
   const navRow: Array<{ text: string; callback_data: string }> = [];
   if (browseState.page > 0) navRow.push({ text: t.browse.prevPage, callback_data: 'browse_page:prev' });
   if (browseState.page < totalPages - 1) navRow.push({ text: t.browse.nextPage, callback_data: 'browse_page:next' });
   if (navRow.length) keyboard.push(navRow);
 
+  keyboard.push([{
+    text: activeFilterLabels.length ? format(t.browse.filtersButtonActive, { count: activeFilterLabels.length }) : t.browse.filtersButton,
+    callback_data: 'browse_open_filters',
+  }]);
   keyboard.push([{ text: t.browse.cantFindButton, callback_data: 'browse_explain' }]);
 
-  const reply_markup = { inline_keyboard: keyboard };
+  await sendBrowseView(chatId, telegramId, text, { inline_keyboard: keyboard });
+}
 
-  if (browseState.messageId) {
-    try {
-      await bot.editMessageText(text, { chat_id: chatId, message_id: browseState.messageId, reply_markup });
-      return;
-    } catch { /* message may be gone — fall through and send a fresh one */ }
+// Compact category chooser — tapping a dimension drills into its values.
+async function renderFilterMenu(chatId: number, telegramId: string) {
+  const user = await prisma.user.findUnique({ where: { telegramId } });
+  const t = getTexts(user?.language);
+  const browseState = getBrowseState(telegramId);
+  browseState.view = 'filterMenu';
+
+  const { labels: activeFilterLabels, text: filtersSummary } = buildActiveFiltersSummary(browseState, t);
+  const text = `${t.browse.filterMenuHeader}\n\n${filtersSummary}`;
+
+  const keyboard: Array<Array<{ text: string; callback_data: string }>> = [
+    [{ text: `${browseState.language ? '✅ ' : ''}${t.browse.filterLanguageOption}`, callback_data: 'browse_filter_dim:language' }],
+    [{ text: `${browseState.title ? '✅ ' : ''}${t.browse.filterTitleOption}`, callback_data: 'browse_filter_dim:title' }],
+    [{ text: `${browseState.country ? '✅ ' : ''}${t.browse.filterCountryOption}`, callback_data: 'browse_filter_dim:country' }],
+  ];
+  if (activeFilterLabels.length) {
+    keyboard.push([{ text: t.browse.clearFilters, callback_data: 'browse_clear' }]);
   }
-  const sent = await bot.sendMessage(chatId, text, { reply_markup });
-  browseState.messageId = (sent as Message).message_id;
+  keyboard.push([{ text: t.browse.backToList, callback_data: 'browse_back_to_list' }]);
+
+  await sendBrowseView(chatId, telegramId, text, { inline_keyboard: keyboard });
+}
+
+// Values for one filter dimension — built from whatever actually exists
+// among currently available mentors.
+async function renderFilterValues(chatId: number, telegramId: string, dimension: BrowseFilterDimension) {
+  const user = await prisma.user.findUnique({ where: { telegramId } });
+  const t = getTexts(user?.language);
+  const browseState = getBrowseState(telegramId);
+  browseState.view = 'filterValues';
+  browseState.filterDimension = dimension;
+
+  const allMentors = await prisma.mentorProfile.findMany({ where: { availability: true } });
+
+  let values: string[];
+  let translateValue: (v: string) => string;
+  if (dimension === 'language') {
+    values = [...new Set(allMentors.map((m) => m.language))];
+    translateValue = languageDisplayName;
+  } else if (dimension === 'title') {
+    values = [...new Set(allMentors.map((m) => m.title).filter((v): v is string => !!v))];
+    translateValue = (v) => translateOption(t.locale, v, 'title');
+  } else {
+    values = [...new Set(allMentors.map((m) => m.country).filter((v): v is string => !!v))];
+    translateValue = (v) => translateOption(t.locale, v, 'country');
+  }
+
+  const keyboard: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let i = 0; i < values.length; i += 2) {
+    keyboard.push(values.slice(i, i + 2).map((v) => ({
+      text: `${browseState[dimension] === v ? '✅ ' : ''}${translateValue(v)}`,
+      callback_data: `browse_filter:${dimension}:${v}`,
+    })));
+  }
+  keyboard.push([{ text: t.browse.backToFilterMenu, callback_data: 'browse_open_filters' }]);
+
+  await sendBrowseView(chatId, telegramId, t.browse.filterValuesHeader, { inline_keyboard: keyboard });
 }
 
 async function searchMentorsForMentee(chatId: number, telegramId: string) {
@@ -1298,30 +1345,48 @@ bot.on('callback_query', async (callbackQuery) => {
     return;
   }
 
-  // ── Mentor browse: toggle a filter, page, clear filters, or "can't find" ──
+  // ── Mentor browse: open filters, drill into a dimension, toggle a value,
+  // clear filters, page, navigate back, or "can't find" ──
+  if (data === 'browse_open_filters') {
+    if (!chatId) return;
+    await renderFilterMenu(chatId, telegramId);
+    return;
+  }
+
+  if (data.startsWith('browse_filter_dim:')) {
+    if (!chatId) return;
+    const dimension = data.slice('browse_filter_dim:'.length) as BrowseFilterDimension;
+    await renderFilterValues(chatId, telegramId, dimension);
+    return;
+  }
+
   if (data.startsWith('browse_filter:')) {
     if (!chatId) return;
     const rest = data.slice('browse_filter:'.length);
     const sepIdx = rest.indexOf(':');
-    const dimension = rest.slice(0, sepIdx) as 'language' | 'title' | 'country';
+    const dimension = rest.slice(0, sepIdx) as BrowseFilterDimension;
     const value = rest.slice(sepIdx + 1);
-    const browseState = mentorBrowseState.get(telegramId) ?? { page: 0 };
-    mentorBrowseState.set(telegramId, browseState);
+    const browseState = getBrowseState(telegramId);
     browseState[dimension] = browseState[dimension] === value ? undefined : value;
     browseState.page = 0;
+    // Applying a value returns straight to the results so the effect is visible immediately.
     await renderMentorBrowseList(chatId, telegramId);
     return;
   }
 
   if (data === 'browse_clear') {
     if (!chatId) return;
-    const browseState = mentorBrowseState.get(telegramId);
-    if (browseState) {
-      browseState.language = undefined;
-      browseState.title = undefined;
-      browseState.country = undefined;
-      browseState.page = 0;
-    }
+    const browseState = getBrowseState(telegramId);
+    browseState.language = undefined;
+    browseState.title = undefined;
+    browseState.country = undefined;
+    browseState.page = 0;
+    await renderMentorBrowseList(chatId, telegramId);
+    return;
+  }
+
+  if (data === 'browse_back_to_list') {
+    if (!chatId) return;
     await renderMentorBrowseList(chatId, telegramId);
     return;
   }
@@ -1329,11 +1394,9 @@ bot.on('callback_query', async (callbackQuery) => {
   if (data.startsWith('browse_page:')) {
     if (!chatId) return;
     const direction = data.slice('browse_page:'.length);
-    const browseState = mentorBrowseState.get(telegramId);
-    if (browseState) {
-      browseState.page += direction === 'next' ? 1 : -1;
-      if (browseState.page < 0) browseState.page = 0;
-    }
+    const browseState = getBrowseState(telegramId);
+    browseState.page += direction === 'next' ? 1 : -1;
+    if (browseState.page < 0) browseState.page = 0;
     await renderMentorBrowseList(chatId, telegramId);
     return;
   }
