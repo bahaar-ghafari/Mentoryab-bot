@@ -928,31 +928,39 @@ async function renderMentorBrowseList(chatId: number, telegramId: string) {
   browseState.page = Math.min(Math.max(0, browseState.page), totalPages - 1);
   const pageItems = filtered.slice(browseState.page * MENTORS_PER_PAGE, browseState.page * MENTORS_PER_PAGE + MENTORS_PER_PAGE);
 
-  let text = `${t.browse.header}\n`;
+  const activeFilterLabels: string[] = [];
+  if (browseState.language) activeFilterLabels.push(`🌐 ${languageDisplayName(browseState.language)}`);
+  if (browseState.title) activeFilterLabels.push(`💼 ${translateOption(t.locale, browseState.title, 'title')}`);
+  if (browseState.country) activeFilterLabels.push(`🌍 ${translateOption(t.locale, browseState.country, 'country')}`);
+  const filtersSummary = activeFilterLabels.length
+    ? format(t.browse.activeFilters, { filters: activeFilterLabels.join(', ') })
+    : t.browse.noFiltersApplied;
+
+  let text = `${t.browse.header}\n\n${filtersSummary}\n`;
   if (!filtered.length) {
     text += `\n${t.browse.noneMatchFilters}`;
   } else {
-    for (const m of pageItems) {
+    pageItems.forEach((m, idx) => {
+      const num = browseState.page * MENTORS_PER_PAGE + idx + 1;
       const displaySkills = m.skills.map((s) => translateOption(t.locale, s, 'skill')).join(', ') || t.messages.notAvailable;
       const displayTitle = m.title ? translateOption(t.locale, m.title, 'title') : null;
-      text += `\n👤 ${m.name}`;
+      text += `\n${num}. 👤 ${m.name}`;
       if (displayTitle) text += `\n${t.summary.title}: ${displayTitle}`;
       text += `\n${t.summary.skills}: ${displaySkills}`;
       text += `\n${t.summary.experience}: ${format(t.summary.yearsLabel, { n: m.experienceYears })}`;
       text += `\n${t.summary.location}: ${m.location || t.messages.notAvailable}`;
       text += `\n${t.summary.language}: ${languageDisplayName(m.language)}\n`;
-    }
+    });
     text += `\n${format(t.browse.pageIndicator, { current: browseState.page + 1, total: totalPages })}`;
   }
 
+  // Keyboard is ordered to match how someone would actually use it: narrow
+  // down with filters first, then see matching results, then page/escalate.
   const keyboard: Array<Array<{ text: string; callback_data: string }>> = [];
-  for (const m of pageItems) {
-    keyboard.push([{ text: `${t.messages.requestButtonPrefix} ${m.name}`, callback_data: `request:${m.id}` }]);
-  }
 
   const languageOptions = [...new Set(allMentors.map((m) => m.language))];
   if (languageOptions.length > 1) {
-    keyboard.push([{ text: t.browse.filterLanguage, callback_data: 'noop' }]);
+    keyboard.push([{ text: t.browse.filterLanguageDivider, callback_data: 'noop' }]);
     keyboard.push(languageOptions.map((code) => ({
       text: `${browseState.language === code ? '✅ ' : ''}${languageDisplayName(code)}`,
       callback_data: `browse_filter:language:${code}`,
@@ -960,7 +968,7 @@ async function renderMentorBrowseList(chatId: number, telegramId: string) {
   }
   const titleOptions = [...new Set(allMentors.map((m) => m.title).filter((v): v is string => !!v))];
   if (titleOptions.length > 0) {
-    keyboard.push([{ text: t.browse.filterTitle, callback_data: 'noop' }]);
+    keyboard.push([{ text: t.browse.filterTitleDivider, callback_data: 'noop' }]);
     for (let i = 0; i < titleOptions.length; i += 2) {
       keyboard.push(titleOptions.slice(i, i + 2).map((title) => ({
         text: `${browseState.title === title ? '✅ ' : ''}${translateOption(t.locale, title, 'title')}`,
@@ -970,7 +978,7 @@ async function renderMentorBrowseList(chatId: number, telegramId: string) {
   }
   const countryOptions = [...new Set(allMentors.map((m) => m.country).filter((v): v is string => !!v))];
   if (countryOptions.length > 0) {
-    keyboard.push([{ text: t.browse.filterCountry, callback_data: 'noop' }]);
+    keyboard.push([{ text: t.browse.filterCountryDivider, callback_data: 'noop' }]);
     for (let i = 0; i < countryOptions.length; i += 2) {
       keyboard.push(countryOptions.slice(i, i + 2).map((country) => ({
         text: `${browseState.country === country ? '✅ ' : ''}${translateOption(t.locale, country, 'country')}`,
@@ -978,15 +986,21 @@ async function renderMentorBrowseList(chatId: number, telegramId: string) {
       })));
     }
   }
+  if (browseState.language || browseState.title || browseState.country) {
+    keyboard.push([{ text: t.browse.clearFilters, callback_data: 'browse_clear' }]);
+  }
+
+  if (pageItems.length) {
+    keyboard.push([{ text: t.browse.resultsDivider, callback_data: 'noop' }]);
+    for (const m of pageItems) {
+      keyboard.push([{ text: `${t.messages.requestButtonPrefix} ${m.name}`, callback_data: `request:${m.id}` }]);
+    }
+  }
 
   const navRow: Array<{ text: string; callback_data: string }> = [];
   if (browseState.page > 0) navRow.push({ text: t.browse.prevPage, callback_data: 'browse_page:prev' });
   if (browseState.page < totalPages - 1) navRow.push({ text: t.browse.nextPage, callback_data: 'browse_page:next' });
   if (navRow.length) keyboard.push(navRow);
-
-  if (browseState.language || browseState.title || browseState.country) {
-    keyboard.push([{ text: t.browse.clearFilters, callback_data: 'browse_clear' }]);
-  }
 
   keyboard.push([{ text: t.browse.cantFindButton, callback_data: 'browse_explain' }]);
 
