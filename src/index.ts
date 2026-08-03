@@ -992,9 +992,10 @@ async function renderMentorBrowseList(chatId: number, telegramId: string) {
 
   if (pageItems.length) {
     keyboard.push([{ text: t.browse.resultsDivider, callback_data: 'noop' }]);
-    for (const m of pageItems) {
-      keyboard.push([{ text: `${t.messages.requestButtonPrefix} ${m.name}`, callback_data: `request:${m.id}` }]);
-    }
+    pageItems.forEach((m, idx) => {
+      const num = browseState.page * MENTORS_PER_PAGE + idx + 1;
+      keyboard.push([{ text: `${num}. ${t.messages.requestButtonPrefix}`, callback_data: `request:${m.id}` }]);
+    });
   }
 
   const navRow: Array<{ text: string; callback_data: string }> = [];
