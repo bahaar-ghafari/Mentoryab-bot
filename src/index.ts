@@ -38,6 +38,10 @@ interface UserState {
   // onboarding — capturing that field's new value saves just that field and
   // returns to the profile view, instead of advancing to the next question.
   editingField?: string;
+  // Set when an admin is editing someone else's profile from the admin list —
+  // the field's new value is saved to this telegramId's profile instead of
+  // the acting (admin) telegramId's own, and the audit actor is 'admin'.
+  targetTelegramId?: string;
 }
 
 dotenv.config();
@@ -214,11 +218,11 @@ function buildLanguageInlineKeyboard() {
   return { inline_keyboard: [LANGUAGE_CHOICES.map((l) => ({ text: l.label, callback_data: `language:${l.code}` }))] };
 }
 
-function buildMainMenuKeyboard(isMentor: boolean, hasProfile: boolean, isAdmin: boolean, t: Texts) {
+function buildMainMenuKeyboard(isMentor: boolean, isAvailable: boolean, hasProfile: boolean, isAdmin: boolean, t: Texts) {
   const keyboard: Array<Array<{ text: string }>> = [];
   keyboard.push([{ text: t.startMenu.joinMentors }, { text: t.startMenu.needMentor }]);
   if (isMentor) {
-    keyboard.push([{ text: t.startMenu.busy }, { text: t.startMenu.available }]);
+    keyboard.push([{ text: isAvailable ? t.startMenu.busy : t.startMenu.available }]);
   }
   if (hasProfile) {
     keyboard.push([{ text: t.startMenu.editProfile }]);
@@ -509,8 +513,9 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
     await bot.sendMessage(chatId, t.messages.mentorWelcome);
   }
 
+  const mentorAvailability = existingUser?.mentorProfile?.availability ?? true;
   await bot.sendMessage(chatId, t.chooseRole, {
-    reply_markup: buildMainMenuKeyboard(isMentorNow, true, adminIds.has(telegramId), t),
+    reply_markup: buildMainMenuKeyboard(isMentorNow, mentorAvailability, true, adminIds.has(telegramId), t),
   });
 
   // A mentee finishing onboarding almost certainly wants to see matches right
@@ -525,16 +530,27 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
 const MENTOR_PROFILE_FIELDS = ['name', 'title', 'skills', 'experience', 'country', 'city', 'contact', 'language'] as const;
 const MENTEE_PROFILE_FIELDS = ['name', 'goals', 'skills', 'experience', 'country', 'city', 'language'] as const;
 
-function buildProfileEditKeyboard(role: 'mentor' | 'mentee', t: Texts) {
+function buildFieldEditKeyboard(
+  role: 'mentor' | 'mentee',
+  t: Texts,
+  fieldCallback: (field: string) => string,
+  deleteCallback: string,
+  extraRows: Array<Array<{ text: string; callback_data: string }>> = []
+) {
   const fields = role === 'mentor' ? MENTOR_PROFILE_FIELDS : MENTEE_PROFILE_FIELDS;
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
   for (let i = 0; i < fields.length; i += 2) {
     rows.push(
-      fields.slice(i, i + 2).map((f) => ({ text: t.summary[f as keyof Texts['summary']], callback_data: `edit_field:${f}` }))
+      fields.slice(i, i + 2).map((f) => ({ text: t.summary[f as keyof Texts['summary']], callback_data: fieldCallback(f) }))
     );
   }
-  rows.push([{ text: t.messages.deleteProfileButton, callback_data: 'delete_profile_confirm' }]);
+  rows.push([{ text: t.messages.deleteProfileButton, callback_data: deleteCallback }]);
+  rows.push(...extraRows);
   return { inline_keyboard: rows };
+}
+
+function buildProfileEditKeyboard(role: 'mentor' | 'mentee', t: Texts) {
+  return buildFieldEditKeyboard(role, t, (f) => `edit_field:${f}`, 'delete_profile_confirm');
 }
 
 async function showProfileView(chatId: number, telegramId: string) {
@@ -570,6 +586,63 @@ async function showProfileView(chatId: number, telegramId: string) {
   });
 }
 
+// Admin equivalent of showProfileView, for an arbitrary mentor/mentee by ID
+// rather than the acting user's own profile — reachable from the admin
+// mentors/mentees list so an admin can edit or delete anyone's profile.
+async function renderAdminProfileManageView(chatId: number, telegramId: string, role: 'mentor' | 'mentee', profileId: number) {
+  const admin = await prisma.user.findUnique({ where: { telegramId } });
+  const t = getTexts(admin?.language);
+
+  let name: string;
+  let experienceYears: number | null;
+  let country: string | null;
+  let city: string | null;
+  let language: string;
+  let skills: string[];
+  let displayTitle: string | null = null;
+  let contactSummary: string | null = null;
+  let goals: string | null = null;
+
+  if (role === 'mentor') {
+    const profile = await prisma.mentorProfile.findUnique({ where: { id: profileId } });
+    if (!profile) { await bot.sendMessage(chatId, t.admin.profileNotFound); return; }
+    ({ name, experienceYears, country, city, language } = profile);
+    skills = profile.skills;
+    displayTitle = profile.title ? translateOption(t.locale, profile.title, 'title') : null;
+    contactSummary = profile.contactMethods.length ? profile.contactMethods.join(', ') : null;
+  } else {
+    const profile = await prisma.menteeProfile.findUnique({ where: { id: profileId } });
+    if (!profile) { await bot.sendMessage(chatId, t.admin.profileNotFound); return; }
+    ({ name, experienceYears, country, city, language } = profile);
+    skills = profile.skillsNeeded;
+    goals = profile.goals;
+  }
+
+  const displaySkills = skills.map((s) => translateOption(t.locale, s, 'skill')).join(', ') || t.messages.notAvailable;
+  const displayCountry = country ? translateOption(t.locale, country, 'country') : null;
+
+  const lines = [
+    `${t.summary.name}: ${name}`,
+    displayTitle ? `${t.summary.title}: ${displayTitle}` : null,
+    `${t.summary.skills}: ${displaySkills}`,
+    `${t.summary.experience}: ${format(t.summary.yearsLabel, { n: experienceYears ?? 0 })}`,
+    displayCountry ? `${t.summary.country}: ${displayCountry}` : null,
+    city ? `${t.summary.city}: ${city}` : null,
+    `${t.summary.language}: ${languageDisplayName(language)}`,
+    contactSummary ? `${t.summary.contact}: ${contactSummary}` : null,
+    goals ? `${t.summary.goals}: ${goals}` : null,
+  ].filter(Boolean).join('\n');
+
+  const keyboard = buildFieldEditKeyboard(
+    role, t,
+    (f) => `admin_edit_field:${role}:${profileId}:${f}`,
+    `admin_delete_profile_confirm:${role}:${profileId}`,
+    [[{ text: t.browse.backToList, callback_data: `admin_back_to_list:${role}` }]]
+  );
+
+  await bot.sendMessage(chatId, `${t.messages.profileViewHeader}\n\n${lines}`, { reply_markup: keyboard });
+}
+
 // Advances to the next onboarding step as usual, unless this state exists to
 // edit a single field of an existing profile — then it saves just that field
 // and returns to the profile view instead of continuing through every question.
@@ -586,7 +659,8 @@ async function advanceOrFinish(chatId: number, telegramId: string, state: UserSt
 
 async function saveEditedFieldAndReturnToProfile(chatId: number, telegramId: string, state: UserState) {
   const field = state.editingField!;
-  const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
+  const targetTelegramId = state.targetTelegramId ?? telegramId;
+  const user = await prisma.user.findUnique({ where: { telegramId: targetTelegramId }, include: { mentorProfile: true, menteeProfile: true } });
   const profileId = state.role === 'mentor' ? user?.mentorProfile?.id : user?.menteeProfile?.id;
 
   if (profileId) {
@@ -631,7 +705,7 @@ async function saveEditedFieldAndReturnToProfile(chatId: number, telegramId: str
         } else {
           await prisma.menteeProfile.update({ where: { id: profileId }, data: updateData });
         }
-        await logProfileAudit(telegramId, state.role === 'mentor' ? 'MENTOR' : 'MENTEE', 'UPDATE', telegramId, { field, ...updateData });
+        await logProfileAudit(targetTelegramId, state.role === 'mentor' ? 'MENTOR' : 'MENTEE', 'UPDATE', state.targetTelegramId ? 'admin' : telegramId, { field, ...updateData });
       } catch (err: unknown) {
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
           const t = getTexts(state.language);
@@ -645,7 +719,11 @@ async function saveEditedFieldAndReturnToProfile(chatId: number, telegramId: str
   }
 
   userStates.delete(telegramId);
-  await showProfileView(chatId, telegramId);
+  if (state.targetTelegramId && profileId) {
+    await renderAdminProfileManageView(chatId, telegramId, state.role, profileId);
+  } else if (!state.targetTelegramId) {
+    await showProfileView(chatId, telegramId);
+  }
 }
 
 // ── Express & bot setup ───────────────────────────────────────────────────────
@@ -850,7 +928,7 @@ bot.onText(/\/start/, async (msg: Message) => {
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
   const t = getTexts(user?.language);
   await bot.sendMessage(chatId, `${t.welcome}\n\n${t.chooseRole}`, {
-    reply_markup: buildMainMenuKeyboard(Boolean(user?.mentorProfile), Boolean(user?.mentorProfile || user?.menteeProfile), adminIds.has(telegramId), t),
+    reply_markup: buildMainMenuKeyboard(Boolean(user?.mentorProfile), user?.mentorProfile?.availability ?? true, Boolean(user?.mentorProfile || user?.menteeProfile), adminIds.has(telegramId), t),
   });
 });
 
@@ -993,7 +1071,7 @@ async function renderMentorBrowseList(chatId: number, telegramId: string) {
   const keyboard: Array<Array<{ text: string; callback_data: string }>> = [];
   pageItems.forEach((m, idx) => {
     const num = browseState.page * MENTORS_PER_PAGE + idx + 1;
-    keyboard.push([{ text: `${num}. ${t.messages.requestButtonPrefix}`, callback_data: `request:${m.id}` }]);
+    keyboard.push([{ text: `${num}. ${t.messages.requestButtonPrefix} ${m.name}`, callback_data: `request:${m.id}` }]);
   });
 
   const navRow: Array<{ text: string; callback_data: string }> = [];
@@ -1158,11 +1236,13 @@ const handleSetBusy = async (msg: Message) => {
 
 const handleSetAvailable = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
-  const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
   const t = getTexts(user?.language);
   if (!user?.mentorProfile) { await bot.sendMessage(msg.chat.id, t.messages.needMentorProfile); return; }
   await prisma.mentorProfile.update({ where: { id: user.mentorProfile.id }, data: { availability: true, busyUntil: null } });
-  await bot.sendMessage(msg.chat.id, t.messages.availableSet);
+  await bot.sendMessage(msg.chat.id, t.messages.availableSet, {
+    reply_markup: buildMainMenuKeyboard(true, true, Boolean(user.mentorProfile || user.menteeProfile), adminIds.has(telegramId), t),
+  });
 };
 
 const handleHelp = async (msg: Message) => {
@@ -1178,13 +1258,11 @@ const handleEditProfile = async (msg: Message) => {
   await showProfileView(msg.chat.id, String(msg.from?.id));
 };
 
-const handleAdminMentorsList = async (msg: Message) => {
-  const telegramId = String(msg.from?.id);
-  if (!adminIds.has(telegramId)) return;
+async function renderAdminMentorsList(chatId: number, telegramId: string) {
   const admin = await prisma.user.findUnique({ where: { telegramId } });
   const t = getTexts(admin?.language);
   const mentors = await prisma.mentorProfile.findMany({ orderBy: { createdAt: 'asc' } });
-  if (!mentors.length) { await bot.sendMessage(msg.chat.id, t.admin.noMentorsRegistered); return; }
+  if (!mentors.length) { await bot.sendMessage(chatId, t.admin.noMentorsRegistered); return; }
   const lines = mentors.map((m, i) => [
     `${i + 1}. ${m.name} [${m.availability ? t.admin.available : t.admin.busy}]`,
     m.title ? `   ${t.summary.title}: ${translateOption(t.locale, m.title, 'title')}` : null,
@@ -1194,16 +1272,22 @@ const handleAdminMentorsList = async (msg: Message) => {
     `   ${t.summary.language}: ${languageDisplayName(m.language)}`,
     m.contactMethods.length ? `   ${t.summary.contact}: ${m.contactMethods.join(', ')}` : null,
   ].filter(Boolean).join('\n'));
-  await bot.sendMessage(msg.chat.id, `${format(t.admin.mentorsListHeader, { count: mentors.length })}\n\n${lines.join('\n\n')}`);
-};
+  await bot.sendMessage(chatId, `${format(t.admin.mentorsListHeader, { count: mentors.length })}\n\n${lines.join('\n\n')}`);
 
-const handleAdminMenteesList = async (msg: Message) => {
-  const telegramId = String(msg.from?.id);
-  if (!adminIds.has(telegramId)) return;
+  const manageRows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let i = 0; i < mentors.length; i += 2) {
+    manageRows.push(
+      mentors.slice(i, i + 2).map((m, idx) => ({ text: `${i + idx + 1}. ${m.name}`, callback_data: `admin_manage_mentor:${m.id}` }))
+    );
+  }
+  await bot.sendMessage(chatId, t.admin.manageMentorsPrompt, { reply_markup: { inline_keyboard: manageRows } });
+}
+
+async function renderAdminMenteesList(chatId: number, telegramId: string) {
   const admin = await prisma.user.findUnique({ where: { telegramId } });
   const t = getTexts(admin?.language);
   const mentees = await prisma.menteeProfile.findMany({ orderBy: { createdAt: 'asc' } });
-  if (!mentees.length) { await bot.sendMessage(msg.chat.id, t.admin.noMenteesRegistered); return; }
+  if (!mentees.length) { await bot.sendMessage(chatId, t.admin.noMenteesRegistered); return; }
   const lines = mentees.map((m, i) => [
     `${i + 1}. ${m.name}`,
     `   ${t.summary.skills}: ${m.skillsNeeded.map((s) => translateOption(t.locale, s, 'skill')).join(', ')}`,
@@ -1212,7 +1296,27 @@ const handleAdminMenteesList = async (msg: Message) => {
     `   ${t.summary.language}: ${languageDisplayName(m.language)}`,
     m.goals ? `   ${t.summary.goals}: ${m.goals}` : null,
   ].filter(Boolean).join('\n'));
-  await bot.sendMessage(msg.chat.id, `${format(t.admin.menteesListHeader, { count: mentees.length })}\n\n${lines.join('\n\n')}`);
+  await bot.sendMessage(chatId, `${format(t.admin.menteesListHeader, { count: mentees.length })}\n\n${lines.join('\n\n')}`);
+
+  const manageRows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let i = 0; i < mentees.length; i += 2) {
+    manageRows.push(
+      mentees.slice(i, i + 2).map((m, idx) => ({ text: `${i + idx + 1}. ${m.name}`, callback_data: `admin_manage_mentee:${m.id}` }))
+    );
+  }
+  await bot.sendMessage(chatId, t.admin.manageMenteesPrompt, { reply_markup: { inline_keyboard: manageRows } });
+}
+
+const handleAdminMentorsList = async (msg: Message) => {
+  const telegramId = String(msg.from?.id);
+  if (!adminIds.has(telegramId)) return;
+  await renderAdminMentorsList(msg.chat.id, telegramId);
+};
+
+const handleAdminMenteesList = async (msg: Message) => {
+  const telegramId = String(msg.from?.id);
+  if (!adminIds.has(telegramId)) return;
+  await renderAdminMenteesList(msg.chat.id, telegramId);
 };
 
 const handleAdminRestart = async (msg: Message) => {
@@ -1313,11 +1417,12 @@ bot.on('callback_query', async (callbackQuery) => {
   // ── Busy duration selection (Set Busy flow, or the busy-reminder prompt) ──
   if (data.startsWith('busy_set:')) {
     if (!chatId) return;
-    const mentorUser = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
+    const mentorUser = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
     if (!mentorUser?.mentorProfile) return;
     const mt = getTexts(mentorUser.language);
     const action = data.slice('busy_set:'.length);
     const messageId = callbackQuery.message?.message_id;
+    const hasAnyProfile = Boolean(mentorUser.mentorProfile || mentorUser.menteeProfile);
 
     if (action === 'pickdate') {
       if (messageId) {
@@ -1333,7 +1438,9 @@ bot.on('callback_query', async (callbackQuery) => {
     }
     if (action === 'available_now') {
       await prisma.mentorProfile.update({ where: { id: mentorUser.mentorProfile.id }, data: { availability: true, busyUntil: null } });
-      await bot.sendMessage(chatId, mt.messages.availableSet);
+      await bot.sendMessage(chatId, mt.messages.availableSet, {
+        reply_markup: buildMainMenuKeyboard(true, true, hasAnyProfile, adminIds.has(telegramId), mt),
+      });
       return;
     }
 
@@ -1347,7 +1454,9 @@ bot.on('callback_query', async (callbackQuery) => {
     // action === 'indefinite' leaves busyUntil as null — no scheduled reminder
 
     await prisma.mentorProfile.update({ where: { id: mentorUser.mentorProfile.id }, data: { availability: false, busyUntil } });
-    await bot.sendMessage(chatId, mt.messages.busySet);
+    await bot.sendMessage(chatId, mt.messages.busySet, {
+      reply_markup: buildMainMenuKeyboard(true, false, hasAnyProfile, adminIds.has(telegramId), mt),
+    });
     return;
   }
 
@@ -1503,7 +1612,7 @@ bot.on('callback_query', async (callbackQuery) => {
     const stillHasOtherProfile = role === 'mentor' ? Boolean(user.menteeProfile) : Boolean(user.mentorProfile);
     const isMentorNow = role === 'mentor' ? false : Boolean(user.mentorProfile);
     await bot.sendMessage(chatId, t.chooseRole, {
-      reply_markup: buildMainMenuKeyboard(isMentorNow, stillHasOtherProfile, adminIds.has(telegramId), t),
+      reply_markup: buildMainMenuKeyboard(isMentorNow, user.mentorProfile?.availability ?? true, stillHasOtherProfile, adminIds.has(telegramId), t),
     });
     return;
   }
@@ -1511,6 +1620,134 @@ bot.on('callback_query', async (callbackQuery) => {
   if (data === 'delete_profile_no') {
     if (!chatId) return;
     await showProfileView(chatId, telegramId);
+    return;
+  }
+
+  // ── Admin: manage (edit/delete) any mentor or mentee from the admin list ──
+  if (data.startsWith('admin_manage_mentor:') || data.startsWith('admin_manage_mentee:')) {
+    if (!chatId || !adminIds.has(telegramId)) return;
+    const isMentorTarget = data.startsWith('admin_manage_mentor:');
+    const id = Number(data.slice(isMentorTarget ? 'admin_manage_mentor:'.length : 'admin_manage_mentee:'.length));
+    await renderAdminProfileManageView(chatId, telegramId, isMentorTarget ? 'mentor' : 'mentee', id);
+    return;
+  }
+
+  if (data.startsWith('admin_back_to_list:')) {
+    if (!chatId || !adminIds.has(telegramId)) return;
+    const role = data.slice('admin_back_to_list:'.length);
+    if (role === 'mentor') await renderAdminMentorsList(chatId, telegramId);
+    else await renderAdminMenteesList(chatId, telegramId);
+    return;
+  }
+
+  if (data.startsWith('admin_edit_field:')) {
+    if (!chatId || !adminIds.has(telegramId)) return;
+    const rest = data.slice('admin_edit_field:'.length);
+    const [role, profileIdStr, field] = rest.split(':') as ['mentor' | 'mentee', string, string];
+    const profileId = Number(profileIdStr);
+    const admin = await prisma.user.findUnique({ where: { telegramId } });
+    const adminLocale: Locale = admin && isLocale(admin.language) ? admin.language : 'en';
+
+    let editState: UserState;
+    if (role === 'mentor') {
+      const profile = await prisma.mentorProfile.findUnique({ where: { id: profileId }, include: { user: true } });
+      if (!profile) return;
+      const existingContacts: Partial<Record<ContactType, string>> = {};
+      if (profile.telegramContact) existingContacts.telegram = profile.telegramContact;
+      if (profile.phoneContact) existingContacts.phone = profile.phoneContact;
+      if (profile.emailContact) existingContacts.email = profile.emailContact;
+      editState = {
+        role: 'mentor',
+        stepIndex: 0,
+        profile: {
+          name: profile.name,
+          title: profile.title || '',
+          goals: '',
+          skills: profile.skills.join(', '),
+          country: profile.country || '',
+          city: profile.city || '',
+        },
+        selectedSkills: [...profile.skills],
+        contactMethods: existingContacts,
+        language: adminLocale,
+        editingField: field,
+        targetTelegramId: profile.user.telegramId,
+      };
+    } else {
+      const profile = await prisma.menteeProfile.findUnique({ where: { id: profileId }, include: { user: true } });
+      if (!profile) return;
+      editState = {
+        role: 'mentee',
+        stepIndex: 0,
+        profile: {
+          name: profile.name,
+          title: '',
+          goals: profile.goals || '',
+          skills: profile.skillsNeeded.join(', '),
+          country: profile.country || '',
+          city: profile.city || '',
+        },
+        selectedSkills: [...profile.skillsNeeded],
+        language: adminLocale,
+        editingField: field,
+        targetTelegramId: profile.user.telegramId,
+      };
+    }
+    userStates.set(telegramId, editState);
+
+    if (field === 'language') {
+      const editT = getTexts(editState.language);
+      await bot.sendMessage(chatId, editT.prompts.editSpokenLanguage, {
+        reply_markup: buildLanguageInlineKeyboard(),
+      });
+      return;
+    }
+    await showStep(chatId, field, role, telegramId);
+    return;
+  }
+
+  if (data.startsWith('admin_delete_profile_confirm:')) {
+    if (!chatId || !adminIds.has(telegramId)) return;
+    const [role, idStr] = data.slice('admin_delete_profile_confirm:'.length).split(':') as ['mentor' | 'mentee', string];
+    const id = Number(idStr);
+    const admin = await prisma.user.findUnique({ where: { telegramId } });
+    const at = getTexts(admin?.language);
+    const name = role === 'mentor'
+      ? (await prisma.mentorProfile.findUnique({ where: { id } }))?.name
+      : (await prisma.menteeProfile.findUnique({ where: { id } }))?.name;
+    if (!name) { await bot.sendMessage(chatId, at.admin.profileNotFound); return; }
+    const roleLabel = role === 'mentor' ? at.summary.roleMentor : at.summary.roleMentee;
+    await bot.sendMessage(chatId, format(at.admin.confirmDeleteProfile, { role: roleLabel, name }), {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: at.messages.deleteProfileConfirmYes, callback_data: `admin_delete_profile_yes:${role}:${id}` },
+          { text: at.messages.deleteProfileConfirmCancel, callback_data: `admin_manage_${role}:${id}` },
+        ]],
+      },
+    });
+    return;
+  }
+
+  if (data.startsWith('admin_delete_profile_yes:')) {
+    if (!chatId || !adminIds.has(telegramId)) return;
+    const [role, idStr] = data.slice('admin_delete_profile_yes:'.length).split(':') as ['mentor' | 'mentee', string];
+    const id = Number(idStr);
+    const admin = await prisma.user.findUnique({ where: { telegramId } });
+    const at = getTexts(admin?.language);
+
+    if (role === 'mentor') {
+      const profile = await prisma.mentorProfile.findUnique({ where: { id }, include: { user: true } });
+      if (!profile) { await bot.sendMessage(chatId, at.admin.profileNotFound); return; }
+      await logProfileAudit(profile.user.telegramId, 'MENTOR', 'DELETE', 'admin', profile);
+      await prisma.mentorProfile.delete({ where: { id } });
+      await bot.sendMessage(chatId, format(at.admin.mentorDeleted, { id }));
+    } else {
+      const profile = await prisma.menteeProfile.findUnique({ where: { id }, include: { user: true } });
+      if (!profile) { await bot.sendMessage(chatId, at.admin.profileNotFound); return; }
+      await logProfileAudit(profile.user.telegramId, 'MENTEE', 'DELETE', 'admin', profile);
+      await prisma.menteeProfile.delete({ where: { id } });
+      await bot.sendMessage(chatId, format(at.admin.menteeDeleted, { id }));
+    }
     return;
   }
 
@@ -1826,7 +2063,7 @@ bot.on('message', async (msg: Message) => {
       return;
     }
     const labels = getContactLabels(state.language);
-    if (await isContactValueTaken(state.awaitingContactType, text, telegramId)) {
+    if (await isContactValueTaken(state.awaitingContactType, text, state.targetTelegramId ?? telegramId)) {
       await bot.sendMessage(chatId, format(t.messages.contactTaken, { contactType: labels[state.awaitingContactType] }));
       return;
     }
