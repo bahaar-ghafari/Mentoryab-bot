@@ -467,8 +467,9 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
     language: state.language,
   };
 
+  let savedUser: Prisma.UserGetPayload<{ include: { mentorProfile: true; menteeProfile: true } }>;
   try {
-    await prisma.user.upsert({
+    savedUser = await prisma.user.upsert({
       where: { telegramId },
       // A user re-running onboarding already has a MentorProfile/MenteeProfile
       // (one-to-one relation) — nested `create` would throw P2014 and crash the
@@ -477,8 +478,10 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
       update: {
         role,
         language: state.language,
+        // approved is only ever set on creation (below) — re-running
+        // onboarding to edit an existing profile must never touch it.
         ...(state.role === 'mentor'
-          ? { mentorProfile: { upsert: { create: mentorData, update: mentorData } } }
+          ? { mentorProfile: { upsert: { create: { ...mentorData, approved: false }, update: mentorData } } }
           : { menteeProfile: { upsert: { create: menteeData, update: menteeData } } }),
       },
       // Use upsert, not update: a user who taps "Become Mentor"/"Find Mentor" without
@@ -488,8 +491,9 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
         telegramId,
         role,
         language: state.language,
-        ...(state.role === 'mentor' ? { mentorProfile: { create: mentorData } } : { menteeProfile: { create: menteeData } }),
+        ...(state.role === 'mentor' ? { mentorProfile: { create: { ...mentorData, approved: false } } } : { menteeProfile: { create: menteeData } }),
       },
+      include: { mentorProfile: true, menteeProfile: true },
     });
   } catch (err: unknown) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
@@ -555,9 +559,14 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
   // The keyboard rides along on this welcome message instead of a separate
   // "Choose an option:" message.
   if (isMentorNow && !hadProfileBefore) {
-    await bot.sendMessage(chatId, t.messages.mentorWelcome, {
+    // New mentors need admin approval before showing up in mentee searches —
+    // the enthusiastic mentorWelcome message is now deferred to approval time.
+    await bot.sendMessage(chatId, t.messages.mentorProfileSentForApproval, {
       reply_markup: buildMainMenuKeyboard(true, adminIds.has(telegramId), t),
     });
+    if (savedUser.mentorProfile) {
+      await notifyAdminsOfNewMentorSignup(savedUser.mentorProfile.id, state.profile.name || 'Mentor');
+    }
   } else {
     await bot.sendMessage(chatId, t.chooseRole, {
       reply_markup: buildMainMenuKeyboard(true, adminIds.has(telegramId), t),
@@ -567,7 +576,32 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
   // A mentee finishing onboarding almost certainly wants to see matches right
   // away rather than tapping Find Mentor again immediately afterward.
   if (!isMentorNow) {
+    if (!hadProfileBefore) {
+      await notifyAdminsOfNewMenteeSignup(state.profile.name || 'Mentee');
+    }
     await searchMentorsForMentee(chatId, telegramId);
+  }
+}
+
+// Sends every admin the new mentor's name with an Approve button — the
+// mentor stays hidden from mentee searches (approved: false) until one
+// admin taps it.
+async function notifyAdminsOfNewMentorSignup(mentorProfileId: number, mentorName: string) {
+  for (const adminId of adminIds) {
+    const adminUser = await prisma.user.findUnique({ where: { telegramId: adminId } });
+    const at = getTexts(adminUser?.language);
+    await bot.sendMessage(Number(adminId), format(at.messages.newMentorPendingApproval, { name: mentorName }), {
+      reply_markup: { inline_keyboard: [[{ text: at.messages.feedbackApprove, callback_data: `approve_mentor:${mentorProfileId}` }]] },
+    }).catch((err) => console.error('Failed to notify admin of new mentor signup:', err));
+  }
+}
+
+// Purely informational — mentees don't need approval, admins just get a log.
+async function notifyAdminsOfNewMenteeSignup(menteeName: string) {
+  for (const adminId of adminIds) {
+    const adminUser = await prisma.user.findUnique({ where: { telegramId: adminId } });
+    const at = getTexts(adminUser?.language);
+    await bot.sendMessage(Number(adminId), format(at.messages.newMenteeSignupLog, { name: menteeName })).catch((err) => console.error('Failed to notify admin of new mentee signup:', err));
   }
 }
 
@@ -742,6 +776,7 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
   let contactSummary: string | null = null;
   let goals: string | null = null;
   let mentorCreatedAt: Date | null = null;
+  let mentorApproved = true;
 
   if (role === 'mentor') {
     const profile = await prisma.mentorProfile.findUnique({ where: { id: profileId } });
@@ -751,6 +786,7 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
     displayTitle = profile.title ? translateOption(t.locale, profile.title, 'title') : null;
     contactSummary = profile.contactMethods.length ? profile.contactMethods.join(', ') : null;
     mentorCreatedAt = profile.createdAt;
+    mentorApproved = profile.approved;
   } else {
     const profile = await prisma.menteeProfile.findUnique({ where: { id: profileId } });
     if (!profile) { await bot.sendMessage(chatId, t.admin.profileNotFound); return; }
@@ -763,7 +799,7 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
   const displayCountry = country ? translateOption(t.locale, country, 'country') : null;
 
   const lines = [
-    `${t.summary.name}: ${name}`,
+    `${t.summary.name}: ${name}${role === 'mentor' && !mentorApproved ? ` ${t.messages.mentorApprovalPending}` : ''}`,
     displayTitle ? `${t.summary.title}: ${displayTitle}` : null,
     `${t.summary.skills}: ${displaySkills}`,
     `${t.summary.experience}: ${format(t.summary.yearsLabel, { n: experienceYears ?? 0 })}`,
@@ -786,11 +822,17 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
     }
   }
 
+  const extraRows: Array<Array<{ text: string; callback_data: string }>> = [];
+  if (role === 'mentor' && !mentorApproved) {
+    extraRows.push([{ text: t.messages.feedbackApprove, callback_data: `approve_mentor:${profileId}` }]);
+  }
+  extraRows.push([{ text: t.browse.backToList, callback_data: `admin_back_to_list:${role}` }]);
+
   const keyboard = buildFieldEditKeyboard(
     role, t,
     (f) => `admin_edit_field:${role}:${profileId}:${f}`,
     `admin_delete_profile_confirm:${role}:${profileId}`,
-    [[{ text: t.browse.backToList, callback_data: `admin_back_to_list:${role}` }]]
+    extraRows
   );
 
   await bot.sendMessage(chatId, `${t.messages.profileViewHeader}\n\n${lines}${feedbackBlock}`, { reply_markup: keyboard });
@@ -1217,7 +1259,7 @@ async function renderMentorBrowseList(chatId: number, telegramId: string) {
   const t = getTexts(user?.language);
   if (!user?.menteeProfile) { await bot.sendMessage(chatId, t.messages.completeMenteeProfile); return; }
 
-  const allMentors = await prisma.mentorProfile.findMany({ where: { availability: true } });
+  const allMentors = await prisma.mentorProfile.findMany({ where: { availability: true, approved: true } });
 
   if (!allMentors.length) {
     pendingMentorExplanation.add(telegramId);
@@ -1318,7 +1360,7 @@ async function renderFilterValues(chatId: number, telegramId: string, dimension:
   browseState.view = 'filterValues';
   browseState.filterDimension = dimension;
 
-  const allMentors = await prisma.mentorProfile.findMany({ where: { availability: true } });
+  const allMentors = await prisma.mentorProfile.findMany({ where: { availability: true, approved: true } });
 
   let values: string[];
   let translateValue: (v: string) => string;
@@ -1507,7 +1549,7 @@ async function renderAdminMentorsList(chatId: number, telegramId: string) {
   const mentors = await prisma.mentorProfile.findMany({ orderBy: { createdAt: 'asc' } });
   if (!mentors.length) { await bot.sendMessage(chatId, t.admin.noMentorsRegistered); return; }
   const lines = mentors.map((m, i) => [
-    `${i + 1}. ${m.name} [${m.availability ? t.admin.available : t.admin.busy}]`,
+    `${i + 1}. ${m.name} [${m.availability ? t.admin.available : t.admin.busy}]${m.approved ? '' : ` ${t.messages.mentorApprovalPending}`}`,
     m.title ? `   ${t.summary.title}: ${translateOption(t.locale, m.title, 'title')}` : null,
     `   ${t.summary.skills}: ${m.skills.map((s) => translateOption(t.locale, s, 'skill')).join(', ')}`,
     `   ${t.summary.experience}: ${format(t.summary.yearsLabel, { n: m.experienceYears })}`,
@@ -2233,6 +2275,16 @@ bot.on('callback_query', async (callbackQuery) => {
       format(rt.messages.requestNew, { menteeName: mentee.menteeProfile.name, menteeId: mentee.menteeProfile.id }),
       { reply_markup: { inline_keyboard: [[{ text: rt.actions.accept, callback_data: `accept:${mentee.menteeProfile.id}` }, { text: rt.actions.decline, callback_data: `decline:${mentee.menteeProfile.id}` }]] } }
     );
+
+    // Purely informational — admins just get a log of the request, no action needed.
+    for (const adminId of adminIds) {
+      const adminUser = await prisma.user.findUnique({ where: { telegramId: adminId } });
+      const at = getTexts(adminUser?.language);
+      await bot.sendMessage(Number(adminId), format(at.messages.newMentorRequestLog, {
+        menteeName: mentee.menteeProfile.name,
+        mentorName: mentor.name,
+      })).catch((err) => console.error('Failed to notify admin of mentor request:', err));
+    }
     return;
   }
 
@@ -2329,6 +2381,22 @@ bot.on('callback_query', async (callbackQuery) => {
     if (!feedback) return;
     await prisma.mentorFeedback.update({ where: { id: feedbackId }, data: { adminApproved: approve } });
     await bot.sendMessage(chatId, approve ? t.messages.feedbackApprovedByYou : t.messages.feedbackRejectedByYou);
+    return;
+  }
+
+  // ── Admin approves a new mentor signup — makes them visible to mentees
+  // and sends them the welcome message that used to show immediately ──
+  if (data.startsWith('approve_mentor:')) {
+    if (!chatId || !adminIds.has(telegramId)) return;
+    const mentorProfileId = Number(data.slice('approve_mentor:'.length));
+    const profile = await prisma.mentorProfile.findUnique({ where: { id: mentorProfileId }, include: { user: true } });
+    if (!profile) { await bot.sendMessage(chatId, t.admin.profileNotFound); return; }
+
+    await prisma.mentorProfile.update({ where: { id: mentorProfileId }, data: { approved: true } });
+    await bot.sendMessage(chatId, format(t.messages.mentorApprovedConfirmation, { name: profile.name }));
+
+    const mentorT = getTexts(profile.user.language);
+    await bot.sendMessage(Number(profile.user.telegramId), mentorT.messages.mentorWelcome).catch((err) => console.error('Failed to notify mentor of approval:', err));
     return;
   }
 });

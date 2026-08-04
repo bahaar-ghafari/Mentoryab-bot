@@ -46,6 +46,9 @@ model MentorProfile {
   country         String?
   location        String?
   availability    Boolean  @default(true)
+  // New mentor signups need admin approval before showing up in mentee
+  // searches. Never reset by profile edits — only set once, at creation.
+  approved        Boolean  @default(false)
   busyUntil       DateTime?
   contactMethods  String[] @default([])
   telegramContact String?  @unique
