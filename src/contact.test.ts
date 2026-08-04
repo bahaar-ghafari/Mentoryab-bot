@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { buildContactTypeKeyboard, isValidEmail, renderContactMethodsSummary } from './contact.js';
+import {
+  buildContactTypeKeyboard,
+  isValidEmail,
+  isValidPhone,
+  isValidTelegramUsername,
+  normalizeTelegramUsername,
+  renderContactMethodsSummary,
+} from './contact.js';
 
 describe('contact helpers', () => {
   it('renders contact methods summary correctly', () => {
@@ -75,5 +82,59 @@ describe('isValidEmail', () => {
 
   it('rejects an empty string', () => {
     expect(isValidEmail('')).toBe(false);
+  });
+});
+
+describe('isValidTelegramUsername', () => {
+  it('accepts a well-formed username, with or without a leading @', () => {
+    expect(isValidTelegramUsername('john_doe')).toBe(true);
+    expect(isValidTelegramUsername('@john_doe')).toBe(true);
+  });
+
+  it('rejects usernames that are too short, start with a digit, or contain invalid characters', () => {
+    expect(isValidTelegramUsername('abcd')).toBe(false);
+    expect(isValidTelegramUsername('1abcde')).toBe(false);
+    expect(isValidTelegramUsername('john doe')).toBe(false);
+    expect(isValidTelegramUsername('john-doe')).toBe(false);
+  });
+
+  it('rejects an empty string', () => {
+    expect(isValidTelegramUsername('')).toBe(false);
+    expect(isValidTelegramUsername('@')).toBe(false);
+  });
+});
+
+describe('normalizeTelegramUsername', () => {
+  it('adds a leading @ when missing', () => {
+    expect(normalizeTelegramUsername('john_doe')).toBe('@john_doe');
+  });
+
+  it('does not double up an existing @', () => {
+    expect(normalizeTelegramUsername('@john_doe')).toBe('@john_doe');
+  });
+
+  it('trims surrounding whitespace', () => {
+    expect(normalizeTelegramUsername('  john_doe  ')).toBe('@john_doe');
+  });
+});
+
+describe('isValidPhone', () => {
+  it('accepts common phone formats', () => {
+    expect(isValidPhone('+1234567890')).toBe(true);
+    expect(isValidPhone('+1 (234) 567-890')).toBe(true);
+    expect(isValidPhone('09123456789')).toBe(true);
+  });
+
+  it('rejects too few or too many digits', () => {
+    expect(isValidPhone('12345')).toBe(false);
+    expect(isValidPhone('1234567890123456')).toBe(false);
+  });
+
+  it('rejects letters or other invalid characters', () => {
+    expect(isValidPhone('call-me-maybe')).toBe(false);
+  });
+
+  it('rejects an empty string', () => {
+    expect(isValidPhone('')).toBe(false);
   });
 });

@@ -13,6 +13,9 @@ import {
   buildContactTypeKeyboard,
   renderContactMethodsSummary,
   isValidEmail,
+  isValidPhone,
+  isValidTelegramUsername,
+  normalizeTelegramUsername,
 } from './contact.js';
 
 const ONBOARDING_STEPS = {
@@ -89,6 +92,27 @@ async function isContactValueTaken(type: ContactType, value: string, currentTele
 // button — records one contact value and re-renders the type picker with
 // the updated summary, either by editing the tracked message or falling
 // back to a fresh one.
+// Re-renders the contact-type picker with whatever's currently collected —
+// shared by add, change, remove, and "back to types" so they all land on
+// the same view.
+async function renderContactTypeSummary(chatId: number, state: UserState, t: Texts) {
+  const labels = getContactLabels(state.language);
+  const collected = state.contactMethods || {};
+  const all: ContactType[] = ['telegram', 'phone', 'email'];
+  const remaining = all.filter((ct) => !collected[ct]);
+  const collectedStr = renderCollectedContacts(collected, labels);
+  const prompt = collectedStr
+    ? (remaining.length > 0 ? `${collectedStr}\n\n${t.messages.addAnotherContact}` : `${collectedStr}\n\n${t.messages.allContactMethodsAdded}`)
+    : t.prompts.contact;
+  const reply_markup = buildContactTypeKeyboard(collected, state.stepIndex > 0, labels, { back: t.ui.back, done: t.ui.done });
+  try {
+    await bot.editMessageText(prompt, { chat_id: chatId, message_id: state.currentMessageId, reply_markup });
+  } catch {
+    const sent = await bot.sendMessage(chatId, prompt, { reply_markup });
+    state.currentMessageId = (sent as Message).message_id;
+  }
+}
+
 async function saveContactValueAndShowSummary(
   chatId: number,
   telegramId: string,
@@ -105,26 +129,33 @@ async function saveContactValueAndShowSummary(
   if (!state.contactMethods) state.contactMethods = {};
   state.contactMethods[type] = value;
   state.awaitingContactType = undefined;
-  const collected = state.contactMethods;
-  const all: ContactType[] = ['telegram', 'phone', 'email'];
-  const remaining = all.filter((ct) => !collected[ct]);
-  const collectedStr = renderCollectedContacts(collected, labels);
-  const prompt = remaining.length > 0
-    ? `${collectedStr}\n\n${t.messages.addAnotherContact}`
-    : `${collectedStr}\n\n${t.messages.allContactMethodsAdded}`;
-  try {
-    await bot.editMessageText(prompt, {
-      chat_id: chatId,
-      message_id: state.currentMessageId,
-      reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0, labels, { back: t.ui.back, done: t.ui.done }),
-    });
-  } catch {
-    const sent = await bot.sendMessage(chatId, prompt, {
-      reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0, labels, { back: t.ui.back, done: t.ui.done }),
-    });
-    state.currentMessageId = (sent as Message).message_id;
-  }
+  await renderContactTypeSummary(chatId, state, t);
   return true;
+}
+
+// Prompt for a new value for one contact type — offers a "use detected
+// username" shortcut for Telegram, since we already know it from /start.
+async function renderContactEntryPrompt(chatId: number, telegramId: string, state: UserState, contactType: ContactType, t: Texts) {
+  const prompts: Record<ContactType, string> = {
+    telegram: t.prompts.contactTelegram,
+    phone: t.prompts.contactPhone,
+    email: t.prompts.contactEmail,
+  };
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  let promptText = prompts[contactType];
+  if (contactType === 'telegram') {
+    const targetUser = await prisma.user.findUnique({ where: { telegramId: state.targetTelegramId ?? telegramId } });
+    if (targetUser?.username) {
+      promptText = format(t.prompts.contactTelegramGuessed, { username: targetUser.username });
+      rows.push([{ text: format(t.messages.useDetectedUsername, { username: targetUser.username }), callback_data: `contact_telegram_confirm:${targetUser.username}` }]);
+    }
+  }
+  rows.push([{ text: t.ui.back, callback_data: 'contact_back_to_types' }]);
+  await bot.editMessageText(promptText, {
+    chat_id: chatId,
+    message_id: state.currentMessageId,
+    reply_markup: { inline_keyboard: rows },
+  }).catch(() => {});
 }
 
 // Records every profile create/update/delete for the admin /history command.
@@ -1023,9 +1054,12 @@ bot.onText(/^\/editmentor(?:\s+([\s\S]+))?$/, async (msg: Message, match: RegExp
     value = rawValue.split(',').map((s) => s.trim()).filter(Boolean);
   } else if (field === 'telegramContact' || field === 'phoneContact' || field === 'emailContact') {
     if (field === 'emailContact' && !isValidEmail(rawValue)) { await bot.sendMessage(chatId, t.messages.invalidEmail); return; }
-    const taken = await prisma.mentorProfile.findFirst({ where: { [field]: rawValue, id: { not: id } } });
+    if (field === 'telegramContact' && !isValidTelegramUsername(rawValue)) { await bot.sendMessage(chatId, t.messages.invalidTelegramUsername); return; }
+    if (field === 'phoneContact' && !isValidPhone(rawValue)) { await bot.sendMessage(chatId, t.messages.invalidPhone); return; }
+    const normalizedValue = field === 'telegramContact' ? normalizeTelegramUsername(rawValue) : rawValue;
+    const taken = await prisma.mentorProfile.findFirst({ where: { [field]: normalizedValue, id: { not: id } } });
     if (taken) { await bot.sendMessage(chatId, t.admin.contactFieldTaken); return; }
-    value = rawValue;
+    value = normalizedValue;
   } else {
     value = rawValue;
   }
@@ -2049,33 +2083,54 @@ bot.on('callback_query', async (callbackQuery) => {
     return;
   }
 
-  // ── Contact type selected ──
+  // ── Contact type selected: if it already has a value, offer Change/Remove
+  // instead of jumping straight to a re-entry prompt ──
   if (data.startsWith('contact_type:')) {
     if (!state || !chatId) return;
     const contactType = data.slice('contact_type:'.length) as ContactType;
-    state.awaitingContactType = contactType;
-    const prompts: Record<ContactType, string> = {
-      telegram: t.prompts.contactTelegram,
-      phone: t.prompts.contactPhone,
-      email: t.prompts.contactEmail,
-    };
+    const existingValue = state.contactMethods?.[contactType];
 
-    const rows: Array<Array<{ text: string; callback_data: string }>> = [];
-    let promptText = prompts[contactType];
-    if (contactType === 'telegram') {
-      const targetUser = await prisma.user.findUnique({ where: { telegramId: state.targetTelegramId ?? telegramId } });
-      if (targetUser?.username) {
-        promptText = format(t.prompts.contactTelegramGuessed, { username: targetUser.username });
-        rows.push([{ text: format(t.messages.useDetectedUsername, { username: targetUser.username }), callback_data: `contact_telegram_confirm:${targetUser.username}` }]);
+    if (existingValue) {
+      const labels = getContactLabels(state.language);
+      const collectedCount = Object.keys(state.contactMethods || {}).length;
+      const rows: Array<Array<{ text: string; callback_data: string }>> = [
+        [{ text: t.messages.changeContactButton, callback_data: `contact_change:${contactType}` }],
+      ];
+      // Can't remove the last remaining contact method — at least one is required.
+      if (collectedCount > 1) {
+        rows.push([{ text: t.messages.removeContactButton, callback_data: `contact_remove:${contactType}` }]);
       }
+      rows.push([{ text: t.ui.back, callback_data: 'contact_back_to_types' }]);
+      await bot.editMessageText(format(t.messages.contactManageHeader, { contactType: labels[contactType], value: existingValue }), {
+        chat_id: chatId,
+        message_id: state.currentMessageId,
+        reply_markup: { inline_keyboard: rows },
+      }).catch(() => {});
+      return;
     }
-    rows.push([{ text: t.ui.back, callback_data: 'contact_back_to_types' }]);
 
-    await bot.editMessageText(promptText, {
-      chat_id: chatId,
-      message_id: state.currentMessageId,
-      reply_markup: { inline_keyboard: rows },
-    }).catch(() => {});
+    state.awaitingContactType = contactType;
+    await renderContactEntryPrompt(chatId, telegramId, state, contactType, t);
+    return;
+  }
+
+  // ── Change an already-set contact value ──
+  if (data.startsWith('contact_change:')) {
+    if (!state || !chatId) return;
+    const contactType = data.slice('contact_change:'.length) as ContactType;
+    state.awaitingContactType = contactType;
+    await renderContactEntryPrompt(chatId, telegramId, state, contactType, t);
+    return;
+  }
+
+  // ── Remove an already-set contact value (only when another one remains) ──
+  if (data.startsWith('contact_remove:')) {
+    if (!state || !chatId) return;
+    const contactType = data.slice('contact_remove:'.length) as ContactType;
+    if (state.contactMethods && Object.keys(state.contactMethods).length > 1) {
+      delete state.contactMethods[contactType];
+    }
+    await renderContactTypeSummary(chatId, state, t);
     return;
   }
 
@@ -2083,7 +2138,7 @@ bot.on('callback_query', async (callbackQuery) => {
   if (data.startsWith('contact_telegram_confirm:')) {
     if (!state || !chatId) return;
     const username = data.slice('contact_telegram_confirm:'.length);
-    await saveContactValueAndShowSummary(chatId, telegramId, state, 'telegram', `@${username}`, t);
+    await saveContactValueAndShowSummary(chatId, telegramId, state, 'telegram', normalizeTelegramUsername(username), t);
     return;
   }
 
@@ -2091,17 +2146,7 @@ bot.on('callback_query', async (callbackQuery) => {
   if (data === 'contact_back_to_types') {
     if (!state || !chatId) return;
     state.awaitingContactType = undefined;
-    const collected = state.contactMethods || {};
-    const labels = getContactLabels(state.language);
-    const collectedStr = renderCollectedContacts(collected, labels);
-    const prompt = collectedStr
-      ? `${collectedStr}\n\n${t.messages.addAnotherContact}`
-      : t.prompts.contact;
-    await bot.editMessageText(prompt, {
-      chat_id: chatId,
-      message_id: state.currentMessageId,
-      reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0, labels, { back: t.ui.back, done: t.ui.done }),
-    }).catch(() => {});
+    await renderContactTypeSummary(chatId, state, t);
     return;
   }
 
@@ -2365,7 +2410,18 @@ bot.on('message', async (msg: Message) => {
       await bot.sendMessage(chatId, t.messages.invalidEmail);
       return;
     }
-    await saveContactValueAndShowSummary(chatId, telegramId, state, state.awaitingContactType, text, t);
+    if (state.awaitingContactType === 'telegram' && !isValidTelegramUsername(text)) {
+      await bot.sendMessage(chatId, t.messages.invalidTelegramUsername);
+      return;
+    }
+    if (state.awaitingContactType === 'phone' && !isValidPhone(text)) {
+      await bot.sendMessage(chatId, t.messages.invalidPhone);
+      return;
+    }
+    // Mentors often type a Telegram username without the leading "@" — add it
+    // rather than storing an inconsistent format.
+    const value = state.awaitingContactType === 'telegram' ? normalizeTelegramUsername(text) : text;
+    await saveContactValueAndShowSummary(chatId, telegramId, state, state.awaitingContactType, value, t);
     return;
   }
 

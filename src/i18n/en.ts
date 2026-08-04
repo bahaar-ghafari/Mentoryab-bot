@@ -44,6 +44,8 @@ export const texts = {
   messages: {
     useButtons: 'Please use the buttons to make your selection.',
     invalidEmail: 'That doesn\'t look like a valid email address. Please enter one like name@example.com.',
+    invalidTelegramUsername: 'That doesn\'t look like a valid Telegram username. It should be 5-32 characters, letters/numbers/underscores only, e.g. @john_doe.',
+    invalidPhone: 'That doesn\'t look like a valid phone number. Please enter one like +1234567890.',
     completeMenteeProfile: 'Please complete your mentee profile first by tapping Find Mentor.',
     askMentorExplanation: '🔍 We couldn\'t find a mentor with a matching skill or title right now.\n\n📝 Tell us what kind of mentor you\'re looking for: what you want to learn and why, your current experience, and what you\'ve already learned so far.\n\nPlease write between {min} and {max} characters.',
     explanationTooShort: 'That\'s a bit short — please write at least {min} characters (you wrote {current}).',
@@ -76,6 +78,9 @@ export const texts = {
     requestButtonPrefix: '📩 Request',
     contactTaken: 'That {contactType} is already registered by another mentor. Please use a different one.',
     useDetectedUsername: '✅ Use @{username}',
+    changeContactButton: '✏️ Change',
+    removeContactButton: '🗑️ Remove',
+    contactManageHeader: '{contactType}: {value}\n\nWhat would you like to do?',
     contactAlreadyTaken: 'One of your contact details is already registered by another mentor. Please review your Telegram ID, phone, or email and try again.',
     noProfileYet: 'You don\'t have a profile yet. Tap Become Mentor or Find Mentor to create one.',
     profileViewHeader: '📋 Your Profile\n\nTap a field below to edit it.',

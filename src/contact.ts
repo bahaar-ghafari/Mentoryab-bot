@@ -48,3 +48,30 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export function isValidEmail(value: string): boolean {
   return EMAIL_PATTERN.test(value.trim());
 }
+
+// Telegram's own username rules: 5-32 chars, letters/digits/underscores,
+// must start with a letter.
+const TELEGRAM_USERNAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_]{4,31}$/;
+
+export function isValidTelegramUsername(value: string): boolean {
+  const withoutAt = value.trim().replace(/^@/, '');
+  return TELEGRAM_USERNAME_PATTERN.test(withoutAt);
+}
+
+// Mentors often type a username without the leading "@" — add it rather
+// than rejecting or silently storing an inconsistent format.
+export function normalizeTelegramUsername(value: string): string {
+  const withoutAt = value.trim().replace(/^@/, '');
+  return `@${withoutAt}`;
+}
+
+// Permissive on formatting (spaces/dashes/parens allowed) but still checks
+// a sane digit count (7-15, matching E.164) so obvious junk is rejected.
+const PHONE_CHARS_PATTERN = /^\+?[0-9\s\-()]{7,20}$/;
+
+export function isValidPhone(value: string): boolean {
+  const trimmed = value.trim();
+  if (!PHONE_CHARS_PATTERN.test(trimmed)) return false;
+  const digitCount = trimmed.replace(/\D/g, '').length;
+  return digitCount >= 7 && digitCount <= 15;
+}
