@@ -873,6 +873,10 @@ bot.onText(/\/mentors/, async (msg: Message) => {
   await handleAdminMentorsList(msg);
 });
 
+bot.onText(/^\/restart$/, async (msg: Message) => {
+  await handleAdminRestart(msg);
+});
+
 bot.onText(/^\/language$/, async (msg: Message) => {
   const chatId = msg.chat.id;
   await bot.sendMessage(chatId, `🌐 ${LOCALE_TEXTS.en.prompts.language}\n${LOCALE_TEXTS.fa.prompts.language}`, {
