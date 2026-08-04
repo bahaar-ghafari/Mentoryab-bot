@@ -22,9 +22,11 @@ describe('contact helpers', () => {
     ]);
   });
 
-  it('builds contact type keyboard with collected methods and done button', () => {
+  it('still shows every type once collected (marked with a checkmark), so any of them can be changed', () => {
     const keyboard = buildContactTypeKeyboard({ telegram: '@user', phone: '+123' }, true);
     expect(keyboard.inline_keyboard.flat().map((button) => button.text)).toEqual([
+      '✅ 💬 Telegram ID',
+      '✅ 📱 Phone Number',
       '📧 Email',
       '← Back',
       'Done ✅ (2)',

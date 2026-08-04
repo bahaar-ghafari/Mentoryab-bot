@@ -12,13 +12,15 @@ export function buildContactTypeKeyboard(
   labels: Record<ContactType, string> = CONTACT_LABELS,
   ui: { back: string; done: string } = { back: '← Back', done: 'Done' }
 ) {
+  // Always show every type, not just missing ones — otherwise there's no way
+  // to change a contact method once it's set (all three would be "collected"
+  // when editing an existing profile, leaving nothing to tap).
   const all: ContactType[] = ['telegram', 'phone', 'email'];
-  const available = all.filter((t) => !collected[t]);
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
 
-  for (let i = 0; i < available.length; i += 2) {
+  for (let i = 0; i < all.length; i += 2) {
     rows.push(
-      available.slice(i, i + 2).map((t) => ({ text: labels[t], callback_data: `contact_type:${t}` }))
+      all.slice(i, i + 2).map((t) => ({ text: `${collected[t] ? '✅ ' : ''}${labels[t]}`, callback_data: `contact_type:${t}` }))
     );
   }
 
