@@ -72,6 +72,9 @@ model MenteeProfile {
   country         String?
   location        String?
   language        String   @default("en")
+  // When a new mentor is approved who'd be a real skill/title match, we DM
+  // this mentee about it — unless they've turned that off.
+  newMatchNotificationsEnabled Boolean @default(true)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   mentorshipRequests MentorshipRequest[]

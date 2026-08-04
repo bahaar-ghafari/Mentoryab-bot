@@ -19,8 +19,8 @@ import {
 } from './contact.js';
 
 const ONBOARDING_STEPS = {
-  mentor: ['language', 'name', 'title', 'skills', 'experience', 'country', 'contact'],
-  mentee: ['language', 'name', 'goals', 'skills', 'experience', 'country'],
+  mentor: ['language', 'spokenLanguage', 'name', 'title', 'skills', 'experience', 'country', 'contact'],
+  mentee: ['language', 'spokenLanguage', 'name', 'goals', 'skills', 'experience', 'country'],
 } as const;
 
 type OnboardingStep = typeof ONBOARDING_STEPS['mentor'][number] | typeof ONBOARDING_STEPS['mentee'][number];
@@ -339,9 +339,20 @@ async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee',
   switch (step) {
     case 'language':
       // Shown before we know the user's preference, so greet in both languages.
+      // This is the bot's display language — the language they speak with
+      // mentees/mentors is asked separately, right after this.
       text = `🌐 ${LOCALE_TEXTS.en.prompts.language}\n${LOCALE_TEXTS.fa.prompts.language}`;
       reply_markup = buildLanguageInlineKeyboard();
       break;
+
+    case 'spokenLanguage': {
+      text = t.prompts.editSpokenLanguage;
+      const langKeyboard = buildLanguageInlineKeyboard();
+      reply_markup = canGoBack
+        ? { inline_keyboard: [...langKeyboard.inline_keyboard, [backBtn]] }
+        : langKeyboard;
+      break;
+    }
 
     case 'name':
       text = state.editingField ? t.prompts.editName : (role === 'mentor' ? t.mentorStart : t.menteeStart);
@@ -454,7 +465,9 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
     telegramContact: state.contactMethods?.telegram || null,
     phoneContact: state.contactMethods?.phone || null,
     emailContact: state.contactMethods?.email || null,
-    language: state.language,
+    // The language they speak with mentees/mentors — asked as its own
+    // onboarding step, kept separate from state.language (the UI locale).
+    language: state.profile.language || state.language,
   };
 
   const menteeData = {
@@ -464,7 +477,7 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
     experienceYears,
     country: state.profile.country || null,
     location,
-    language: state.language,
+    language: state.profile.language || state.language,
   };
 
   let savedUser: Prisma.UserGetPayload<{ include: { mentorProfile: true; menteeProfile: true } }>;
@@ -605,6 +618,43 @@ async function notifyAdminsOfNewMenteeSignup(menteeName: string) {
   }
 }
 
+// After a mentor is approved (and so becomes visible/matchable), check every
+// mentee who previously said "couldn't find you a match" (an unclaimed
+// MentorSearchRequest) — if this new mentor is a real skill/title match for
+// them (not just a bonus-only match), let them know, unless they've muted it.
+async function notifyMenteesOfNewMatch(mentorProfileId: number) {
+  const mentor = await prisma.mentorProfile.findUnique({ where: { id: mentorProfileId } });
+  if (!mentor) return;
+
+  const unclaimedRequests = await prisma.mentorSearchRequest.findMany({
+    where: { claimed: false },
+    include: { menteeProfile: { include: { user: true } } },
+  });
+
+  const notifiedMenteeIds = new Set<number>();
+  for (const request of unclaimedRequests) {
+    const mentee = request.menteeProfile;
+    if (notifiedMenteeIds.has(mentee.id) || !mentee.newMatchNotificationsEnabled) continue;
+
+    const [match] = findMentorMatches(
+      { name: mentee.name, skillsNeeded: mentee.skillsNeeded, experienceYears: mentee.experienceYears, location: mentee.location, language: mentee.language },
+      [{ id: mentor.id, name: mentor.name, title: mentor.title, skills: mentor.skills, experienceYears: mentor.experienceYears, location: mentor.location, availability: mentor.availability, language: mentor.language }]
+    );
+    if (!match || match.overlap <= 0) continue;
+
+    notifiedMenteeIds.add(mentee.id);
+    const mt = getTexts(mentee.user.language);
+    await bot.sendMessage(Number(mentee.user.telegramId), mt.messages.newMatchAvailable, {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: mt.messages.newMatchCheckButton, callback_data: 'newmatch_check' }],
+          [{ text: mt.messages.newMatchMuteButton, callback_data: 'newmatch_mute' }],
+        ],
+      },
+    }).catch((err) => console.error('Failed to notify mentee of new match:', err));
+  }
+}
+
 // ── Profile view (Edit Profile) ───────────────────────────────────────────────
 
 const MENTOR_PROFILE_FIELDS = ['name', 'title', 'skills', 'experience', 'country', 'contact', 'language'] as const;
@@ -741,16 +791,17 @@ async function renderProfileView(chatId: number, telegramId: string, role: 'ment
 
   // Rating, tenure, approved comments, and the list of accepted mentees are
   // only relevant to the mentor themselves (and admins, via the separate
-  // admin manage view) — not shown to mentees browsing.
+  // admin manage view) — not shown to mentees browsing. And none of it means
+  // anything until they've actually mentored at least one person.
   let feedbackBlock = '';
   if (mentor) {
-    const { avg, count, approvedComments } = await getMentorFeedbackSummary(mentor.id);
-    feedbackBlock = `\n${formatRatingLine(avg, count, t)}\n${t.summary.mentorSince}: ${formatTenure(mentor.createdAt, t)}`;
-    if (approvedComments.length) {
-      feedbackBlock += `\n\n${t.messages.feedbackCommentsHeader}\n${approvedComments.slice(0, 5).map((c) => `— ${c}`).join('\n')}`;
-    }
     const menteeNames = await getAcceptedMenteeNames(mentor.id);
     if (menteeNames.length) {
+      const { avg, count, approvedComments } = await getMentorFeedbackSummary(mentor.id);
+      feedbackBlock = `\n${formatRatingLine(avg, count, t)}\n${t.summary.mentorSince}: ${formatTenure(mentor.createdAt, t)}`;
+      if (approvedComments.length) {
+        feedbackBlock += `\n\n${t.messages.feedbackCommentsHeader}\n${approvedComments.slice(0, 5).map((c) => `— ${c}`).join('\n')}`;
+      }
       feedbackBlock += `\n\n${t.messages.mentoredMenteesHeader}\n${menteeNames.map((n) => `• ${n}`).join('\n')}`;
     }
   }
@@ -811,13 +862,13 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
 
   let feedbackBlock = '';
   if (role === 'mentor' && mentorCreatedAt) {
-    const { avg, count, approvedComments } = await getMentorFeedbackSummary(profileId);
-    feedbackBlock = `\n${formatRatingLine(avg, count, t)}\n${t.summary.mentorSince}: ${formatTenure(mentorCreatedAt, t)}`;
-    if (approvedComments.length) {
-      feedbackBlock += `\n\n${t.messages.feedbackCommentsHeader}\n${approvedComments.slice(0, 5).map((c) => `— ${c}`).join('\n')}`;
-    }
     const menteeNames = await getAcceptedMenteeNames(profileId);
     if (menteeNames.length) {
+      const { avg, count, approvedComments } = await getMentorFeedbackSummary(profileId);
+      feedbackBlock = `\n${formatRatingLine(avg, count, t)}\n${t.summary.mentorSince}: ${formatTenure(mentorCreatedAt, t)}`;
+      if (approvedComments.length) {
+        feedbackBlock += `\n\n${t.messages.feedbackCommentsHeader}\n${approvedComments.slice(0, 5).map((c) => `— ${c}`).join('\n')}`;
+      }
       feedbackBlock += `\n\n${t.messages.mentoredMenteesHeader}\n${menteeNames.map((n) => `• ${n}`).join('\n')}`;
     }
   }
@@ -1633,13 +1684,25 @@ bot.on('callback_query', async (callbackQuery) => {
 
     // Editing the profile's spoken language (used for matching/filters) is
     // separate from the UI text locale — do NOT touch User.language or
-    // state.language here; only /language (or the onboarding step) does that.
+    // state.language here; only /language (or the display-language onboarding
+    // step below) does that.
     if (state?.editingField === 'language') {
       state.profile.language = code;
       await saveEditedFieldAndReturnToProfile(chatId, telegramId, state);
       return;
     }
 
+    // Onboarding's dedicated "what language do you speak with mentees/mentors"
+    // step, asked right after the display-language step — also kept separate
+    // from the UI text locale.
+    const isOnboardingSpokenLanguageStep = !!state && ONBOARDING_STEPS[state.role][state.stepIndex] === 'spokenLanguage';
+    if (state && isOnboardingSpokenLanguageStep) {
+      state.profile.language = code;
+      await advanceOrFinish(chatId, telegramId, state);
+      return;
+    }
+
+    // Everything from here on sets the bot's display language.
     await prisma.user.upsert({
       where: { telegramId },
       update: { language: code },
@@ -2397,6 +2460,24 @@ bot.on('callback_query', async (callbackQuery) => {
 
     const mentorT = getTexts(profile.user.language);
     await bot.sendMessage(Number(profile.user.telegramId), mentorT.messages.mentorWelcome).catch((err) => console.error('Failed to notify mentor of approval:', err));
+    await notifyMenteesOfNewMatch(mentorProfileId);
+    return;
+  }
+
+  // ── Mentee taps "Check it out" on a new-match notification ──
+  if (data === 'newmatch_check') {
+    if (!chatId) return;
+    await searchMentorsForMentee(chatId, telegramId);
+    return;
+  }
+
+  // ── Mentee opts out of future new-match notifications ──
+  if (data === 'newmatch_mute') {
+    if (!chatId) return;
+    const user = await prisma.user.findUnique({ where: { telegramId }, include: { menteeProfile: true } });
+    if (!user?.menteeProfile) return;
+    await prisma.menteeProfile.update({ where: { id: user.menteeProfile.id }, data: { newMatchNotificationsEnabled: false } });
+    await bot.sendMessage(chatId, t.messages.newMatchMutedConfirmation);
     return;
   }
 });
@@ -2466,6 +2547,12 @@ bot.on('message', async (msg: Message) => {
   // Normal text step — when editing a single existing field, that field IS
   // the current step regardless of stepIndex (which stays 0 for edits).
   const currentStep = (state.editingField ?? ONBOARDING_STEPS[state.role][state.stepIndex]) as OnboardingStep;
+
+  // Spoken language: button-only, no free-text alternative.
+  if (currentStep === 'spokenLanguage') {
+    await bot.sendMessage(chatId, t.messages.useButtons);
+    return;
+  }
 
   // Contact step: awaiting a typed value for a chosen contact type
   if (currentStep === 'contact') {
