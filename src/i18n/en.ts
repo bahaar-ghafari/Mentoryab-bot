@@ -85,6 +85,11 @@ export const texts = {
     alreadyClaimed: 'This request has already been claimed.',
     reminderBumpPrefix: '⏰ Still looking for a mentor — following up on this request:',
     claimedMarker: '✅ Claimed',
+    deleteProfileButton: '🗑️ Delete Profile',
+    deleteProfileConfirm: '⚠️ Are you sure you want to delete your {role} profile? This can\'t be undone — any pending mentorship requests tied to it will also be removed. (A record is kept for our internal history.)',
+    deleteProfileConfirmYes: '🗑️ Yes, delete it',
+    deleteProfileConfirmCancel: '❌ Cancel',
+    profileDeletedConfirmation: '🗑️ Your {role} profile has been deleted.',
   },
   browse: {
     header: '🔍 Available Mentors',

@@ -85,6 +85,11 @@ export const texts = {
     alreadyClaimed: 'این درخواست قبلاً پذیرفته شده است.',
     reminderBumpPrefix: '⏰ هنوز به دنبال منتور — پیگیری این درخواست:',
     claimedMarker: '✅ پذیرفته شد',
+    deleteProfileButton: '🗑️ حذف پروفایل',
+    deleteProfileConfirm: '⚠️ آیا مطمئن هستید که می‌خواهید پروفایل {role} خود را حذف کنید؟ این کار قابل بازگشت نیست — درخواست‌های منتورینگ مرتبط با آن نیز حذف می‌شوند. (سابقه‌ی آن برای بایگانی داخلی نگه داشته می‌شود.)',
+    deleteProfileConfirmYes: '🗑️ بله، حذف شود',
+    deleteProfileConfirmCancel: '❌ انصراف',
+    profileDeletedConfirmation: '🗑️ پروفایل {role} شما حذف شد.',
   },
   browse: {
     header: '🔍 منتورهای موجود',

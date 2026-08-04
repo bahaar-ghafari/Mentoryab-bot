@@ -533,6 +533,7 @@ function buildProfileEditKeyboard(role: 'mentor' | 'mentee', t: Texts) {
       fields.slice(i, i + 2).map((f) => ({ text: t.summary[f as keyof Texts['summary']], callback_data: `edit_field:${f}` }))
     );
   }
+  rows.push([{ text: t.messages.deleteProfileButton, callback_data: 'delete_profile_confirm' }]);
   return { inline_keyboard: rows };
 }
 
@@ -1455,6 +1456,55 @@ bot.on('callback_query', async (callbackQuery) => {
       return;
     }
     await showStep(chatId, field, role, telegramId);
+    return;
+  }
+
+  // ── Self-service profile delete: confirm, then delete (keeping an audit record) ──
+  if (data === 'delete_profile_confirm') {
+    if (!chatId) return;
+    const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
+    const role: 'mentor' | 'mentee' | null = user?.mentorProfile ? 'mentor' : user?.menteeProfile ? 'mentee' : null;
+    if (!role) return;
+    const roleLabel = role === 'mentor' ? t.summary.roleMentor : t.summary.roleMentee;
+    await bot.sendMessage(chatId, format(t.messages.deleteProfileConfirm, { role: roleLabel }), {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: t.messages.deleteProfileConfirmYes, callback_data: 'delete_profile_yes' },
+          { text: t.messages.deleteProfileConfirmCancel, callback_data: 'delete_profile_no' },
+        ]],
+      },
+    });
+    return;
+  }
+
+  if (data === 'delete_profile_yes') {
+    if (!chatId) return;
+    const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
+    const role: 'mentor' | 'mentee' | null = user?.mentorProfile ? 'mentor' : user?.menteeProfile ? 'mentee' : null;
+    if (!user || !role) return;
+    const roleLabel = role === 'mentor' ? t.summary.roleMentor : t.summary.roleMentee;
+
+    if (role === 'mentor' && user.mentorProfile) {
+      await logProfileAudit(telegramId, 'MENTOR', 'DELETE', telegramId, user.mentorProfile);
+      await prisma.mentorProfile.delete({ where: { id: user.mentorProfile.id } });
+    } else if (role === 'mentee' && user.menteeProfile) {
+      await logProfileAudit(telegramId, 'MENTEE', 'DELETE', telegramId, user.menteeProfile);
+      await prisma.menteeProfile.delete({ where: { id: user.menteeProfile.id } });
+    }
+
+    await bot.sendMessage(chatId, format(t.messages.profileDeletedConfirmation, { role: roleLabel }));
+
+    const stillHasOtherProfile = role === 'mentor' ? Boolean(user.menteeProfile) : Boolean(user.mentorProfile);
+    const isMentorNow = role === 'mentor' ? false : Boolean(user.mentorProfile);
+    await bot.sendMessage(chatId, t.chooseRole, {
+      reply_markup: buildMainMenuKeyboard(isMentorNow, stillHasOtherProfile, adminIds.has(telegramId), t),
+    });
+    return;
+  }
+
+  if (data === 'delete_profile_no') {
+    if (!chatId) return;
+    await showProfileView(chatId, telegramId);
     return;
   }
 
