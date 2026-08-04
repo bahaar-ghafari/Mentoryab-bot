@@ -218,12 +218,11 @@ function buildLanguageInlineKeyboard() {
   return { inline_keyboard: [LANGUAGE_CHOICES.map((l) => ({ text: l.label, callback_data: `language:${l.code}` }))] };
 }
 
-function buildMainMenuKeyboard(isMentor: boolean, isAvailable: boolean, hasProfile: boolean, isAdmin: boolean, t: Texts) {
+// Set Busy/Available now lives inside the profile view (alongside Edit and
+// Delete) rather than as its own persistent reply-keyboard button.
+function buildMainMenuKeyboard(hasProfile: boolean, isAdmin: boolean, t: Texts) {
   const keyboard: Array<Array<{ text: string }>> = [];
   keyboard.push([{ text: t.startMenu.joinMentors }, { text: t.startMenu.needMentor }]);
-  if (isMentor) {
-    keyboard.push([{ text: isAvailable ? t.startMenu.busy : t.startMenu.available }]);
-  }
   if (hasProfile) {
     keyboard.push([{ text: t.startMenu.editProfile }]);
   }
@@ -509,14 +508,17 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
   }
 
   // Shown once, on first-time onboarding only — not on every profile edit.
+  // The keyboard rides along on this welcome message instead of a separate
+  // "Choose an option:" message.
   if (isMentorNow && !hadProfileBefore) {
-    await bot.sendMessage(chatId, t.messages.mentorWelcome);
+    await bot.sendMessage(chatId, t.messages.mentorWelcome, {
+      reply_markup: buildMainMenuKeyboard(true, adminIds.has(telegramId), t),
+    });
+  } else {
+    await bot.sendMessage(chatId, t.chooseRole, {
+      reply_markup: buildMainMenuKeyboard(true, adminIds.has(telegramId), t),
+    });
   }
-
-  const mentorAvailability = existingUser?.mentorProfile?.availability ?? true;
-  await bot.sendMessage(chatId, t.chooseRole, {
-    reply_markup: buildMainMenuKeyboard(isMentorNow, mentorAvailability, true, adminIds.has(telegramId), t),
-  });
 
   // A mentee finishing onboarding almost certainly wants to see matches right
   // away rather than tapping Find Mentor again immediately afterward.
@@ -534,7 +536,7 @@ function buildFieldEditKeyboard(
   role: 'mentor' | 'mentee',
   t: Texts,
   fieldCallback: (field: string) => string,
-  deleteCallback: string,
+  deleteCallback: string | null,
   extraRows: Array<Array<{ text: string; callback_data: string }>> = []
 ) {
   const fields = role === 'mentor' ? MENTOR_PROFILE_FIELDS : MENTEE_PROFILE_FIELDS;
@@ -544,13 +546,33 @@ function buildFieldEditKeyboard(
       fields.slice(i, i + 2).map((f) => ({ text: t.summary[f as keyof Texts['summary']], callback_data: fieldCallback(f) }))
     );
   }
-  rows.push([{ text: t.messages.deleteProfileButton, callback_data: deleteCallback }]);
+  if (deleteCallback) {
+    rows.push([{ text: t.messages.deleteProfileButton, callback_data: deleteCallback }]);
+  }
   rows.push(...extraRows);
   return { inline_keyboard: rows };
 }
 
-function buildProfileEditKeyboard(role: 'mentor' | 'mentee', t: Texts) {
-  return buildFieldEditKeyboard(role, t, (f) => `edit_field:${f}`, 'delete_profile_confirm');
+// Top-level profile actions: Edit (drills into the field list below), Set
+// Busy/Available (mentor only — shows whichever action currently applies),
+// and Delete — siblings, rather than mixing the busy toggle into the main
+// reply keyboard or the field-by-field editor.
+function buildProfileActionsKeyboard(role: 'mentor' | 'mentee', isAvailable: boolean, t: Texts) {
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [
+    [{ text: t.messages.editProfileMenuButton, callback_data: 'profile_edit_menu' }],
+  ];
+  if (role === 'mentor') {
+    rows.push([{
+      text: isAvailable ? t.startMenu.busy : t.startMenu.available,
+      callback_data: isAvailable ? 'profile_set_busy' : 'profile_set_available',
+    }]);
+  }
+  rows.push([{ text: t.messages.deleteProfileButton, callback_data: 'delete_profile_confirm' }]);
+  return { inline_keyboard: rows };
+}
+
+function buildProfileFieldListKeyboard(role: 'mentor' | 'mentee', t: Texts) {
+  return buildFieldEditKeyboard(role, t, (f) => `edit_field:${f}`, null, [[{ text: t.ui.back, callback_data: 'profile_actions_back' }]]);
 }
 
 async function showProfileView(chatId: number, telegramId: string) {
@@ -582,7 +604,7 @@ async function showProfileView(chatId: number, telegramId: string) {
   ].filter(Boolean).join('\n');
 
   await bot.sendMessage(chatId, `${t.messages.profileViewHeader}\n\n${lines}`, {
-    reply_markup: buildProfileEditKeyboard(role, t),
+    reply_markup: buildProfileActionsKeyboard(role, mentor?.availability ?? true, t),
   });
 }
 
@@ -928,7 +950,7 @@ bot.onText(/\/start/, async (msg: Message) => {
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
   const t = getTexts(user?.language);
   await bot.sendMessage(chatId, `${t.welcome}\n\n${t.chooseRole}`, {
-    reply_markup: buildMainMenuKeyboard(Boolean(user?.mentorProfile), user?.mentorProfile?.availability ?? true, Boolean(user?.mentorProfile || user?.menteeProfile), adminIds.has(telegramId), t),
+    reply_markup: buildMainMenuKeyboard(Boolean(user?.mentorProfile || user?.menteeProfile), adminIds.has(telegramId), t),
   });
 });
 
@@ -1226,24 +1248,6 @@ async function handleMentorExplanationText(msg: Message) {
   await bot.sendMessage(chatId, t.messages.explanationSentConfirmation);
 }
 
-const handleSetBusy = async (msg: Message) => {
-  const telegramId = String(msg.from?.id);
-  const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
-  const t = getTexts(user?.language);
-  if (!user?.mentorProfile) { await bot.sendMessage(msg.chat.id, t.messages.needMentorProfile); return; }
-  await bot.sendMessage(msg.chat.id, t.busyFlow.prompt, { reply_markup: buildBusyDurationKeyboard(t) });
-};
-
-const handleSetAvailable = async (msg: Message) => {
-  const telegramId = String(msg.from?.id);
-  const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
-  const t = getTexts(user?.language);
-  if (!user?.mentorProfile) { await bot.sendMessage(msg.chat.id, t.messages.needMentorProfile); return; }
-  await prisma.mentorProfile.update({ where: { id: user.mentorProfile.id }, data: { availability: true, busyUntil: null } });
-  await bot.sendMessage(msg.chat.id, t.messages.availableSet, {
-    reply_markup: buildMainMenuKeyboard(true, true, Boolean(user.mentorProfile || user.menteeProfile), adminIds.has(telegramId), t),
-  });
-};
 
 const handleHelp = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
@@ -1422,7 +1426,6 @@ bot.on('callback_query', async (callbackQuery) => {
     const mt = getTexts(mentorUser.language);
     const action = data.slice('busy_set:'.length);
     const messageId = callbackQuery.message?.message_id;
-    const hasAnyProfile = Boolean(mentorUser.mentorProfile || mentorUser.menteeProfile);
 
     if (action === 'pickdate') {
       if (messageId) {
@@ -1438,9 +1441,8 @@ bot.on('callback_query', async (callbackQuery) => {
     }
     if (action === 'available_now') {
       await prisma.mentorProfile.update({ where: { id: mentorUser.mentorProfile.id }, data: { availability: true, busyUntil: null } });
-      await bot.sendMessage(chatId, mt.messages.availableSet, {
-        reply_markup: buildMainMenuKeyboard(true, true, hasAnyProfile, adminIds.has(telegramId), mt),
-      });
+      await bot.sendMessage(chatId, mt.messages.availableSet);
+      await showProfileView(chatId, telegramId);
       return;
     }
 
@@ -1454,9 +1456,8 @@ bot.on('callback_query', async (callbackQuery) => {
     // action === 'indefinite' leaves busyUntil as null — no scheduled reminder
 
     await prisma.mentorProfile.update({ where: { id: mentorUser.mentorProfile.id }, data: { availability: false, busyUntil } });
-    await bot.sendMessage(chatId, mt.messages.busySet, {
-      reply_markup: buildMainMenuKeyboard(true, false, hasAnyProfile, adminIds.has(telegramId), mt),
-    });
+    await bot.sendMessage(chatId, mt.messages.busySet);
+    await showProfileView(chatId, telegramId);
     return;
   }
 
@@ -1523,6 +1524,43 @@ bot.on('callback_query', async (callbackQuery) => {
       min: MIN_EXPLANATION_LENGTH,
       max: MAX_EXPLANATION_LENGTH,
     }));
+    return;
+  }
+
+  // ── Profile actions: drill into the field list, or back out of it ──
+  if (data === 'profile_edit_menu') {
+    if (!chatId) return;
+    const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
+    const role: 'mentor' | 'mentee' | null = user?.mentorProfile ? 'mentor' : user?.menteeProfile ? 'mentee' : null;
+    if (!role) return;
+    await bot.sendMessage(chatId, t.messages.profileEditMenuHeader, {
+      reply_markup: buildProfileFieldListKeyboard(role, t),
+    });
+    return;
+  }
+
+  if (data === 'profile_actions_back') {
+    if (!chatId) return;
+    await showProfileView(chatId, telegramId);
+    return;
+  }
+
+  // ── Profile actions: toggle busy/available (mentor only) ──
+  if (data === 'profile_set_busy') {
+    if (!chatId) return;
+    const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
+    if (!user?.mentorProfile) return;
+    await bot.sendMessage(chatId, t.busyFlow.prompt, { reply_markup: buildBusyDurationKeyboard(t) });
+    return;
+  }
+
+  if (data === 'profile_set_available') {
+    if (!chatId) return;
+    const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
+    if (!user?.mentorProfile) return;
+    await prisma.mentorProfile.update({ where: { id: user.mentorProfile.id }, data: { availability: true, busyUntil: null } });
+    await bot.sendMessage(chatId, t.messages.availableSet);
+    await showProfileView(chatId, telegramId);
     return;
   }
 
@@ -1607,12 +1645,11 @@ bot.on('callback_query', async (callbackQuery) => {
       await prisma.menteeProfile.delete({ where: { id: user.menteeProfile.id } });
     }
 
-    await bot.sendMessage(chatId, format(t.messages.profileDeletedConfirmation, { role: roleLabel }));
-
+    // A warm goodbye instead of "Choose an option:" — the keyboard rides
+    // along on this message rather than a separate one.
     const stillHasOtherProfile = role === 'mentor' ? Boolean(user.menteeProfile) : Boolean(user.mentorProfile);
-    const isMentorNow = role === 'mentor' ? false : Boolean(user.mentorProfile);
-    await bot.sendMessage(chatId, t.chooseRole, {
-      reply_markup: buildMainMenuKeyboard(isMentorNow, user.mentorProfile?.availability ?? true, stillHasOtherProfile, adminIds.has(telegramId), t),
+    await bot.sendMessage(chatId, format(t.messages.profileDeletedThankYou, { role: roleLabel }), {
+      reply_markup: buildMainMenuKeyboard(stillHasOtherProfile, adminIds.has(telegramId), t),
     });
     return;
   }
@@ -2003,8 +2040,6 @@ bot.on('callback_query', async (callbackQuery) => {
 const MENU_ACTIONS: Array<[keyof Texts['startMenu'], (msg: Message) => Promise<void>]> = [
   ['joinMentors', startMentorOnboarding],
   ['needMentor', startOrSearchMentee],
-  ['busy', handleSetBusy],
-  ['available', handleSetAvailable],
   ['editProfile', handleEditProfile],
   ['help', handleHelp],
   ['adminMentors', handleAdminMentorsList],

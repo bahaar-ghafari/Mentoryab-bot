@@ -90,7 +90,9 @@ export const texts = {
     deleteProfileConfirm: '⚠️ آیا مطمئن هستید که می‌خواهید پروفایل {role} خود را حذف کنید؟ این کار قابل بازگشت نیست — درخواست‌های منتورینگ مرتبط با آن نیز حذف می‌شوند. (سابقه‌ی آن برای بایگانی داخلی نگه داشته می‌شود.)',
     deleteProfileConfirmYes: '🗑️ بله، حذف شود',
     deleteProfileConfirmCancel: '❌ انصراف',
-    profileDeletedConfirmation: '🗑️ پروفایل {role} شما حذف شد.',
+    profileDeletedThankYou: '👋 پروفایل {role} شما حذف شد. از اینکه بخشی از Mentoryab بودید سپاسگزاریم — از وقت و تلاش شما متشکریم!',
+    editProfileMenuButton: '✏️ ویرایش',
+    profileEditMenuHeader: '✏️ کدام بخش را می‌خواهید ویرایش کنید؟',
   },
   browse: {
     header: '🔍 منتورهای موجود',

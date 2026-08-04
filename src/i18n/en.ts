@@ -90,7 +90,9 @@ export const texts = {
     deleteProfileConfirm: '⚠️ Are you sure you want to delete your {role} profile? This can\'t be undone — any pending mentorship requests tied to it will also be removed. (A record is kept for our internal history.)',
     deleteProfileConfirmYes: '🗑️ Yes, delete it',
     deleteProfileConfirmCancel: '❌ Cancel',
-    profileDeletedConfirmation: '🗑️ Your {role} profile has been deleted.',
+    profileDeletedThankYou: '👋 Your {role} profile has been removed. Thank you for being part of Mentoryab — we appreciate your time and effort!',
+    editProfileMenuButton: '✏️ Edit',
+    profileEditMenuHeader: '✏️ Which field would you like to edit?',
   },
   browse: {
     header: '🔍 Available Mentors',
