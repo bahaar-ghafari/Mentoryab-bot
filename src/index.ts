@@ -565,20 +565,20 @@ function buildFieldEditKeyboard(
 // reply keyboard or the field-by-field editor.
 function buildProfileActionsKeyboard(role: 'mentor' | 'mentee', isAvailable: boolean, t: Texts) {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [
-    [{ text: t.messages.editProfileMenuButton, callback_data: 'profile_edit_menu' }],
+    [{ text: t.messages.editProfileMenuButton, callback_data: `profile_edit_menu:${role}` }],
   ];
   if (role === 'mentor') {
     rows.push([{
       text: isAvailable ? t.startMenu.busy : t.startMenu.available,
-      callback_data: isAvailable ? 'profile_set_busy' : 'profile_set_available',
+      callback_data: isAvailable ? `profile_set_busy:${role}` : `profile_set_available:${role}`,
     }]);
   }
-  rows.push([{ text: t.messages.deleteProfileButton, callback_data: 'delete_profile_confirm' }]);
+  rows.push([{ text: t.messages.deleteProfileButton, callback_data: `delete_profile_confirm:${role}` }]);
   return { inline_keyboard: rows };
 }
 
 function buildProfileFieldListKeyboard(role: 'mentor' | 'mentee', t: Texts) {
-  return buildFieldEditKeyboard(role, t, (f) => `edit_field:${f}`, null, [[{ text: t.ui.back, callback_data: 'profile_actions_back' }]]);
+  return buildFieldEditKeyboard(role, t, (f) => `edit_field:${role}:${f}`, null, [[{ text: t.ui.back, callback_data: `profile_actions_back:${role}` }]]);
 }
 
 // Score is always public once given; a comment only joins it once BOTH the
@@ -605,17 +605,52 @@ function formatRatingLine(avg: number | null, count: number, t: Texts): string {
   return `${t.summary.rating}: ${avg.toFixed(1)} (${format(t.summary.reviewsLabel, { count })})`;
 }
 
+async function getAcceptedMenteeNames(mentorProfileId: number): Promise<string[]> {
+  const requests = await prisma.mentorshipRequest.findMany({
+    where: { mentorProfileId, status: 'ACCEPTED' },
+    include: { menteeProfile: true },
+    orderBy: { updatedAt: 'desc' },
+  });
+  return requests.map((r) => r.menteeProfile.name);
+}
+
+// Entry point for "Edit Profile" — if the account has both a mentor and a
+// mentee profile (e.g. an admin who tested both flows), ask which one to
+// view first rather than always defaulting to the mentor side.
 async function showProfileView(chatId: number, telegramId: string) {
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
   const t = getTexts(user?.language);
   if (!user) return;
 
-  const role: 'mentor' | 'mentee' | null = user.mentorProfile ? 'mentor' : user.menteeProfile ? 'mentee' : null;
-  if (!role) { await bot.sendMessage(chatId, t.messages.noProfileYet); return; }
+  const hasMentor = !!user.mentorProfile;
+  const hasMentee = !!user.menteeProfile;
+  if (!hasMentor && !hasMentee) { await bot.sendMessage(chatId, t.messages.noProfileYet); return; }
 
-  const mentor = user.mentorProfile;
-  const mentee = user.menteeProfile;
-  const profile = (mentor ?? mentee)!;
+  if (hasMentor && hasMentee) {
+    await bot.sendMessage(chatId, t.messages.profileRolePickerHeader, {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: t.messages.profileRoleMentorButton, callback_data: 'profile_view:mentor' }],
+          [{ text: t.messages.profileRoleMenteeButton, callback_data: 'profile_view:mentee' }],
+        ],
+      },
+    });
+    return;
+  }
+
+  await renderProfileView(chatId, telegramId, hasMentor ? 'mentor' : 'mentee');
+}
+
+async function renderProfileView(chatId: number, telegramId: string, role: 'mentor' | 'mentee') {
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
+  const t = getTexts(user?.language);
+  if (!user) return;
+
+  const mentor = role === 'mentor' ? user.mentorProfile : null;
+  const mentee = role === 'mentee' ? user.menteeProfile : null;
+  const profile = mentor ?? mentee;
+  if (!profile) { await bot.sendMessage(chatId, t.messages.noProfileYet); return; }
+
   const skills = mentor ? mentor.skills : mentee!.skillsNeeded;
   const displaySkills = skills.map((s) => translateOption(t.locale, s, 'skill')).join(', ') || t.messages.notAvailable;
   const displayTitle = mentor?.title ? translateOption(t.locale, mentor.title, 'title') : null;
@@ -633,12 +668,19 @@ async function showProfileView(chatId: number, telegramId: string) {
     mentee?.goals ? `${t.summary.goals}: ${mentee.goals}` : null,
   ].filter(Boolean).join('\n');
 
+  // Rating, tenure, approved comments, and the list of accepted mentees are
+  // only relevant to the mentor themselves (and admins, via the separate
+  // admin manage view) — not shown to mentees browsing.
   let feedbackBlock = '';
   if (mentor) {
     const { avg, count, approvedComments } = await getMentorFeedbackSummary(mentor.id);
     feedbackBlock = `\n${formatRatingLine(avg, count, t)}\n${t.summary.mentorSince}: ${formatTenure(mentor.createdAt, t)}`;
     if (approvedComments.length) {
       feedbackBlock += `\n\n${t.messages.feedbackCommentsHeader}\n${approvedComments.slice(0, 5).map((c) => `— ${c}`).join('\n')}`;
+    }
+    const menteeNames = await getAcceptedMenteeNames(mentor.id);
+    if (menteeNames.length) {
+      feedbackBlock += `\n\n${t.messages.mentoredMenteesHeader}\n${menteeNames.map((n) => `• ${n}`).join('\n')}`;
     }
   }
 
@@ -663,6 +705,7 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
   let displayTitle: string | null = null;
   let contactSummary: string | null = null;
   let goals: string | null = null;
+  let mentorCreatedAt: Date | null = null;
 
   if (role === 'mentor') {
     const profile = await prisma.mentorProfile.findUnique({ where: { id: profileId } });
@@ -671,6 +714,7 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
     skills = profile.skills;
     displayTitle = profile.title ? translateOption(t.locale, profile.title, 'title') : null;
     contactSummary = profile.contactMethods.length ? profile.contactMethods.join(', ') : null;
+    mentorCreatedAt = profile.createdAt;
   } else {
     const profile = await prisma.menteeProfile.findUnique({ where: { id: profileId } });
     if (!profile) { await bot.sendMessage(chatId, t.admin.profileNotFound); return; }
@@ -694,6 +738,19 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
     goals ? `${t.summary.goals}: ${goals}` : null,
   ].filter(Boolean).join('\n');
 
+  let feedbackBlock = '';
+  if (role === 'mentor' && mentorCreatedAt) {
+    const { avg, count, approvedComments } = await getMentorFeedbackSummary(profileId);
+    feedbackBlock = `\n${formatRatingLine(avg, count, t)}\n${t.summary.mentorSince}: ${formatTenure(mentorCreatedAt, t)}`;
+    if (approvedComments.length) {
+      feedbackBlock += `\n\n${t.messages.feedbackCommentsHeader}\n${approvedComments.slice(0, 5).map((c) => `— ${c}`).join('\n')}`;
+    }
+    const menteeNames = await getAcceptedMenteeNames(profileId);
+    if (menteeNames.length) {
+      feedbackBlock += `\n\n${t.messages.mentoredMenteesHeader}\n${menteeNames.map((n) => `• ${n}`).join('\n')}`;
+    }
+  }
+
   const keyboard = buildFieldEditKeyboard(
     role, t,
     (f) => `admin_edit_field:${role}:${profileId}:${f}`,
@@ -701,7 +758,7 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
     [[{ text: t.browse.backToList, callback_data: `admin_back_to_list:${role}` }]]
   );
 
-  await bot.sendMessage(chatId, `${t.messages.profileViewHeader}\n\n${lines}`, { reply_markup: keyboard });
+  await bot.sendMessage(chatId, `${t.messages.profileViewHeader}\n\n${lines}${feedbackBlock}`, { reply_markup: keyboard });
 }
 
 // Advances to the next onboarding step as usual, unless this state exists to
@@ -783,7 +840,9 @@ async function saveEditedFieldAndReturnToProfile(chatId: number, telegramId: str
   if (state.targetTelegramId && profileId) {
     await renderAdminProfileManageView(chatId, telegramId, state.role, profileId);
   } else if (!state.targetTelegramId) {
-    await showProfileView(chatId, telegramId);
+    // Go straight back to the role that was being edited, rather than
+    // showProfileView's picker (which only makes sense as an entry point).
+    await renderProfileView(chatId, telegramId, state.role);
   }
 }
 
@@ -1137,7 +1196,6 @@ async function renderMentorBrowseList(chatId: number, telegramId: string) {
   );
 
   const countryById = new Map(allMentors.map((m) => [m.id, m.country]));
-  const createdAtById = new Map(allMentors.map((m) => [m.id, m.createdAt]));
   const filtered = ranked.filter((m) => {
     if (browseState.language && m.language !== browseState.language) return false;
     if (browseState.title && m.title !== browseState.title) return false;
@@ -1155,26 +1213,17 @@ async function renderMentorBrowseList(chatId: number, telegramId: string) {
   if (!filtered.length) {
     text += `\n${t.browse.noneMatchFilters}`;
   } else {
-    for (let idx = 0; idx < pageItems.length; idx++) {
-      const m = pageItems[idx];
+    pageItems.forEach((m, idx) => {
       const num = browseState.page * MENTORS_PER_PAGE + idx + 1;
       const displaySkills = m.skills.map((s) => translateOption(t.locale, s, 'skill')).join(', ') || t.messages.notAvailable;
       const displayTitle = m.title ? translateOption(t.locale, m.title, 'title') : null;
-      const { avg, count, approvedComments } = await getMentorFeedbackSummary(m.id);
-      const createdAt = createdAtById.get(m.id);
       text += `\n${num}. 👤 ${m.name}`;
       if (displayTitle) text += `\n${t.summary.title}: ${displayTitle}`;
       text += `\n${t.summary.skills}: ${displaySkills}`;
       text += `\n${t.summary.experience}: ${format(t.summary.yearsLabel, { n: m.experienceYears })}`;
       text += `\n${t.summary.location}: ${m.location || t.messages.notAvailable}`;
-      text += `\n${t.summary.language}: ${languageDisplayName(m.language)}`;
-      text += `\n${formatRatingLine(avg, count, t)}`;
-      if (createdAt) text += `\n${t.summary.mentorSince}: ${formatTenure(createdAt, t)}`;
-      if (approvedComments.length) {
-        text += `\n${t.messages.feedbackCommentsHeader} ${approvedComments.slice(0, 2).map((c) => `"${c}"`).join(' / ')}`;
-      }
-      text += '\n';
-    }
+      text += `\n${t.summary.language}: ${languageDisplayName(m.language)}\n`;
+    });
     text += `\n${format(t.browse.pageIndicator, { current: browseState.page + 1, total: totalPages })}`;
   }
 
@@ -1593,7 +1642,7 @@ bot.on('callback_query', async (callbackQuery) => {
     if (action === 'available_now') {
       await prisma.mentorProfile.update({ where: { id: mentorUser.mentorProfile.id }, data: { availability: true, busyUntil: null } });
       await bot.sendMessage(chatId, mt.messages.availableSet);
-      await showProfileView(chatId, telegramId);
+      await renderProfileView(chatId, telegramId, 'mentor');
       return;
     }
 
@@ -1608,7 +1657,7 @@ bot.on('callback_query', async (callbackQuery) => {
 
     await prisma.mentorProfile.update({ where: { id: mentorUser.mentorProfile.id }, data: { availability: false, busyUntil } });
     await bot.sendMessage(chatId, mt.messages.busySet);
-    await showProfileView(chatId, telegramId);
+    await renderProfileView(chatId, telegramId, 'mentor');
     return;
   }
 
@@ -1678,26 +1727,33 @@ bot.on('callback_query', async (callbackQuery) => {
     return;
   }
 
-  // ── Profile actions: drill into the field list, or back out of it ──
-  if (data === 'profile_edit_menu') {
+  // ── Choosing which profile to view, when an account has both ──
+  if (data.startsWith('profile_view:')) {
     if (!chatId) return;
-    const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
-    const role: 'mentor' | 'mentee' | null = user?.mentorProfile ? 'mentor' : user?.menteeProfile ? 'mentee' : null;
-    if (!role) return;
+    const role = data.slice('profile_view:'.length) as 'mentor' | 'mentee';
+    await renderProfileView(chatId, telegramId, role);
+    return;
+  }
+
+  // ── Profile actions: drill into the field list, or back out of it ──
+  if (data.startsWith('profile_edit_menu:')) {
+    if (!chatId) return;
+    const role = data.slice('profile_edit_menu:'.length) as 'mentor' | 'mentee';
     await bot.sendMessage(chatId, t.messages.profileEditMenuHeader, {
       reply_markup: buildProfileFieldListKeyboard(role, t),
     });
     return;
   }
 
-  if (data === 'profile_actions_back') {
+  if (data.startsWith('profile_actions_back:')) {
     if (!chatId) return;
-    await showProfileView(chatId, telegramId);
+    const role = data.slice('profile_actions_back:'.length) as 'mentor' | 'mentee';
+    await renderProfileView(chatId, telegramId, role);
     return;
   }
 
   // ── Profile actions: toggle busy/available (mentor only) ──
-  if (data === 'profile_set_busy') {
+  if (data.startsWith('profile_set_busy:')) {
     if (!chatId) return;
     const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
     if (!user?.mentorProfile) return;
@@ -1705,39 +1761,42 @@ bot.on('callback_query', async (callbackQuery) => {
     return;
   }
 
-  if (data === 'profile_set_available') {
+  if (data.startsWith('profile_set_available:')) {
     if (!chatId) return;
     const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
     if (!user?.mentorProfile) return;
     await prisma.mentorProfile.update({ where: { id: user.mentorProfile.id }, data: { availability: true, busyUntil: null } });
     await bot.sendMessage(chatId, t.messages.availableSet);
-    await showProfileView(chatId, telegramId);
+    await renderProfileView(chatId, telegramId, 'mentor');
     return;
   }
 
   // ── Edit a single field from the profile view ──
   if (data.startsWith('edit_field:')) {
     if (!chatId) return;
-    const field = data.slice('edit_field:'.length);
+    const rest = data.slice('edit_field:'.length);
+    const sepIdx = rest.indexOf(':');
+    const role = rest.slice(0, sepIdx) as 'mentor' | 'mentee';
+    const field = rest.slice(sepIdx + 1);
     const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
     if (!user) return;
-    const role: 'mentor' | 'mentee' | null = user.mentorProfile ? 'mentor' : user.menteeProfile ? 'mentee' : null;
-    if (!role) return;
+    const profileForRole = role === 'mentor' ? user.mentorProfile : user.menteeProfile;
+    if (!profileForRole) return;
 
-    const mentor = user.mentorProfile;
-    const mentee = user.menteeProfile;
+    const mentor = role === 'mentor' ? user.mentorProfile : null;
+    const mentee = role === 'mentee' ? user.menteeProfile : null;
     const skills = mentor ? mentor.skills : mentee!.skillsNeeded;
 
     const editState: UserState = {
       role,
       stepIndex: 0,
       profile: {
-        name: (mentor ?? mentee)!.name,
+        name: profileForRole.name,
         title: mentor?.title || '',
         goals: mentee?.goals || '',
         skills: skills.join(', '),
-        country: (mentor ?? mentee)!.country || '',
-        city: (mentor ?? mentee)!.city || '',
+        country: profileForRole.country || '',
+        city: profileForRole.city || '',
       },
       selectedSkills: [...skills],
       language: isLocale(user.language) ? user.language : 'en',
@@ -1764,28 +1823,26 @@ bot.on('callback_query', async (callbackQuery) => {
   }
 
   // ── Self-service profile delete: confirm, then delete (keeping an audit record) ──
-  if (data === 'delete_profile_confirm') {
+  if (data.startsWith('delete_profile_confirm:')) {
     if (!chatId) return;
-    const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
-    const role: 'mentor' | 'mentee' | null = user?.mentorProfile ? 'mentor' : user?.menteeProfile ? 'mentee' : null;
-    if (!role) return;
+    const role = data.slice('delete_profile_confirm:'.length) as 'mentor' | 'mentee';
     const roleLabel = role === 'mentor' ? t.summary.roleMentor : t.summary.roleMentee;
     await bot.sendMessage(chatId, format(t.messages.deleteProfileConfirm, { role: roleLabel }), {
       reply_markup: {
         inline_keyboard: [[
-          { text: t.messages.deleteProfileConfirmYes, callback_data: 'delete_profile_yes' },
-          { text: t.messages.deleteProfileConfirmCancel, callback_data: 'delete_profile_no' },
+          { text: t.messages.deleteProfileConfirmYes, callback_data: `delete_profile_yes:${role}` },
+          { text: t.messages.deleteProfileConfirmCancel, callback_data: `delete_profile_no:${role}` },
         ]],
       },
     });
     return;
   }
 
-  if (data === 'delete_profile_yes') {
+  if (data.startsWith('delete_profile_yes:')) {
     if (!chatId) return;
+    const role = data.slice('delete_profile_yes:'.length) as 'mentor' | 'mentee';
     const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
-    const role: 'mentor' | 'mentee' | null = user?.mentorProfile ? 'mentor' : user?.menteeProfile ? 'mentee' : null;
-    if (!user || !role) return;
+    if (!user) return;
     const roleLabel = role === 'mentor' ? t.summary.roleMentor : t.summary.roleMentee;
 
     if (role === 'mentor' && user.mentorProfile) {
@@ -1805,9 +1862,10 @@ bot.on('callback_query', async (callbackQuery) => {
     return;
   }
 
-  if (data === 'delete_profile_no') {
+  if (data.startsWith('delete_profile_no:')) {
     if (!chatId) return;
-    await showProfileView(chatId, telegramId);
+    const role = data.slice('delete_profile_no:'.length) as 'mentor' | 'mentee';
+    await renderProfileView(chatId, telegramId, role);
     return;
   }
 
