@@ -56,6 +56,7 @@ model MentorProfile {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   mentorshipRequests MentorshipRequest[]
+  feedbackReceived   MentorFeedback[]
 }
 
 model MenteeProfile {
@@ -74,6 +75,7 @@ model MenteeProfile {
   updatedAt       DateTime @updatedAt
   mentorshipRequests MentorshipRequest[]
   mentorSearchRequests MentorSearchRequest[]
+  feedbackGiven   MentorFeedback[]
 }
 
 enum RequestStatus {
@@ -89,8 +91,34 @@ model MentorshipRequest {
   menteeProfile   MenteeProfile  @relation(fields: [menteeProfileId], references: [id], onDelete: Cascade)
   menteeProfileId Int
   status          RequestStatus  @default(PENDING)
+  // Set once we've asked the mentee to rate this mentorship, so the daily
+  // feedback-prompt scheduler doesn't ask again.
+  feedbackRequestedAt DateTime?
+  feedback        MentorFeedback?
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
+}
+
+// A mentee's rating/comment for one accepted mentorship. The score always
+// counts toward the mentor's public average; the comment only becomes
+// visible on the mentor's profile once BOTH the mentor and an admin have
+// approved it (either can silently keep it hidden by leaving their flag
+// false/null — no separate "rejected" state needed for that).
+model MentorFeedback {
+  id                  Int      @id @default(autoincrement())
+  mentorshipRequest   MentorshipRequest @relation(fields: [mentorshipRequestId], references: [id], onDelete: Cascade)
+  mentorshipRequestId Int      @unique
+  mentorProfile       MentorProfile @relation(fields: [mentorProfileId], references: [id], onDelete: Cascade)
+  mentorProfileId     Int
+  menteeProfile       MenteeProfile @relation(fields: [menteeProfileId], references: [id], onDelete: Cascade)
+  menteeProfileId     Int
+  score               Int
+  comment             String?
+  // null = not yet reviewed, true = approved, false = rejected
+  mentorApproved      Boolean?
+  adminApproved       Boolean?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 }
 
 enum AuditAction {

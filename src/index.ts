@@ -245,6 +245,12 @@ function buildBusyDurationKeyboard(t: Texts, includeAvailableNow = false) {
   return { inline_keyboard: rows };
 }
 
+function buildFeedbackScoreKeyboard(requestId: number) {
+  return {
+    inline_keyboard: [[1, 2, 3, 4, 5].map((n) => ({ text: `${n}⭐`, callback_data: `feedback_score:${requestId}:${n}` }))],
+  };
+}
+
 function buildBusyDatePresetsKeyboard(t: Texts) {
   return {
     inline_keyboard: [
@@ -575,6 +581,30 @@ function buildProfileFieldListKeyboard(role: 'mentor' | 'mentee', t: Texts) {
   return buildFieldEditKeyboard(role, t, (f) => `edit_field:${f}`, null, [[{ text: t.ui.back, callback_data: 'profile_actions_back' }]]);
 }
 
+// Score is always public once given; a comment only joins it once BOTH the
+// mentor and an admin have approved it (see MentorFeedback in schema.prisma).
+async function getMentorFeedbackSummary(mentorProfileId: number) {
+  const rows = await prisma.mentorFeedback.findMany({ where: { mentorProfileId } });
+  const count = rows.length;
+  const avg = count ? rows.reduce((sum, r) => sum + r.score, 0) / count : null;
+  const approvedComments = rows
+    .filter((r) => r.comment && r.mentorApproved === true && r.adminApproved === true)
+    .map((r) => r.comment as string);
+  return { avg, count, approvedComments };
+}
+
+function formatTenure(createdAt: Date, t: Texts): string {
+  const months = Math.max(0, Math.floor((Date.now() - createdAt.getTime()) / (1000 * 60 * 60 * 24 * 30)));
+  if (months < 1) return t.summary.tenureNew;
+  if (months < 12) return format(t.summary.tenureMonths, { n: months });
+  return format(t.summary.tenureYears, { n: Math.floor(months / 12) });
+}
+
+function formatRatingLine(avg: number | null, count: number, t: Texts): string {
+  if (!count || avg === null) return `${t.summary.rating}: ${t.summary.noReviewsYet}`;
+  return `${t.summary.rating}: ${avg.toFixed(1)} (${format(t.summary.reviewsLabel, { count })})`;
+}
+
 async function showProfileView(chatId: number, telegramId: string) {
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
   const t = getTexts(user?.language);
@@ -603,7 +633,16 @@ async function showProfileView(chatId: number, telegramId: string) {
     mentee?.goals ? `${t.summary.goals}: ${mentee.goals}` : null,
   ].filter(Boolean).join('\n');
 
-  await bot.sendMessage(chatId, `${t.messages.profileViewHeader}\n\n${lines}`, {
+  let feedbackBlock = '';
+  if (mentor) {
+    const { avg, count, approvedComments } = await getMentorFeedbackSummary(mentor.id);
+    feedbackBlock = `\n${formatRatingLine(avg, count, t)}\n${t.summary.mentorSince}: ${formatTenure(mentor.createdAt, t)}`;
+    if (approvedComments.length) {
+      feedbackBlock += `\n\n${t.messages.feedbackCommentsHeader}\n${approvedComments.slice(0, 5).map((c) => `— ${c}`).join('\n')}`;
+    }
+  }
+
+  await bot.sendMessage(chatId, `${t.messages.profileViewHeader}\n\n${lines}${feedbackBlock}`, {
     reply_markup: buildProfileActionsKeyboard(role, mentor?.availability ?? true, t),
   });
 }
@@ -808,6 +847,39 @@ bot.onText(/^\/history$/, async (msg: Message) => {
   await bot.sendMessage(msg.chat.id, `${format(t.admin.historyHeader, { count: entries.length })}\n\n${lines.join('\n\n')}`);
 });
 
+// Catch-up view for feedback comments that still need a decision — the
+// mentor/admin approval requests are also sent as DMs when the comment is
+// first submitted, but this lets an admin action anything they missed.
+bot.onText(/^\/pendingreviews$/, async (msg: Message) => {
+  const telegramId = String(msg.from?.id);
+  if (!adminIds.has(telegramId)) return;
+  const admin = await prisma.user.findUnique({ where: { telegramId } });
+  const t = getTexts(admin?.language);
+
+  const pending = await prisma.mentorFeedback.findMany({
+    where: { comment: { not: null }, OR: [{ mentorApproved: null }, { adminApproved: null }] },
+    include: { mentorProfile: true, menteeProfile: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (!pending.length) { await bot.sendMessage(msg.chat.id, t.admin.noPendingReviews); return; }
+
+  for (const fb of pending) {
+    await bot.sendMessage(msg.chat.id, format(t.messages.feedbackAdminApprovalRequest, {
+      mentorName: fb.mentorProfile.name,
+      menteeName: fb.menteeProfile.name,
+      score: String(fb.score),
+      comment: fb.comment!,
+    }), {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: t.messages.feedbackApprove, callback_data: `feedback_admin_approve:${fb.id}` },
+          { text: t.messages.feedbackReject, callback_data: `feedback_admin_reject:${fb.id}` },
+        ]],
+      },
+    });
+  }
+});
+
 bot.onText(/^\/deletementor\s+(\d+)\s*$/, async (msg: Message, match: RegExpMatchArray | null) => {
   const telegramId = String(msg.from?.id);
   if (!adminIds.has(telegramId)) return;
@@ -987,6 +1059,12 @@ const MAX_EXPLANATION_LENGTH = 500;
 // after an automatic search found nobody with a relevant skill/title.
 const pendingMentorExplanation = new Set<string>();
 
+// telegramIds currently being asked for an optional feedback comment, after
+// rating a mentor — keyed by the mentee's telegramId, since only one
+// mentorship request can be mid-feedback at a time per mentee.
+const pendingFeedbackComment = new Map<string, { requestId: number; score: number }>();
+const MAX_FEEDBACK_COMMENT_LENGTH = 500;
+
 type BrowseFilterDimension = 'language' | 'title' | 'country';
 
 interface MentorBrowseState {
@@ -1059,6 +1137,7 @@ async function renderMentorBrowseList(chatId: number, telegramId: string) {
   );
 
   const countryById = new Map(allMentors.map((m) => [m.id, m.country]));
+  const createdAtById = new Map(allMentors.map((m) => [m.id, m.createdAt]));
   const filtered = ranked.filter((m) => {
     if (browseState.language && m.language !== browseState.language) return false;
     if (browseState.title && m.title !== browseState.title) return false;
@@ -1076,17 +1155,26 @@ async function renderMentorBrowseList(chatId: number, telegramId: string) {
   if (!filtered.length) {
     text += `\n${t.browse.noneMatchFilters}`;
   } else {
-    pageItems.forEach((m, idx) => {
+    for (let idx = 0; idx < pageItems.length; idx++) {
+      const m = pageItems[idx];
       const num = browseState.page * MENTORS_PER_PAGE + idx + 1;
       const displaySkills = m.skills.map((s) => translateOption(t.locale, s, 'skill')).join(', ') || t.messages.notAvailable;
       const displayTitle = m.title ? translateOption(t.locale, m.title, 'title') : null;
+      const { avg, count, approvedComments } = await getMentorFeedbackSummary(m.id);
+      const createdAt = createdAtById.get(m.id);
       text += `\n${num}. 👤 ${m.name}`;
       if (displayTitle) text += `\n${t.summary.title}: ${displayTitle}`;
       text += `\n${t.summary.skills}: ${displaySkills}`;
       text += `\n${t.summary.experience}: ${format(t.summary.yearsLabel, { n: m.experienceYears })}`;
       text += `\n${t.summary.location}: ${m.location || t.messages.notAvailable}`;
-      text += `\n${t.summary.language}: ${languageDisplayName(m.language)}\n`;
-    });
+      text += `\n${t.summary.language}: ${languageDisplayName(m.language)}`;
+      text += `\n${formatRatingLine(avg, count, t)}`;
+      if (createdAt) text += `\n${t.summary.mentorSince}: ${formatTenure(createdAt, t)}`;
+      if (approvedComments.length) {
+        text += `\n${t.messages.feedbackCommentsHeader} ${approvedComments.slice(0, 2).map((c) => `"${c}"`).join(' / ')}`;
+      }
+      text += '\n';
+    }
     text += `\n${format(t.browse.pageIndicator, { current: browseState.page + 1, total: totalPages })}`;
   }
 
@@ -1246,6 +1334,69 @@ async function handleMentorExplanationText(msg: Message) {
   }
 
   await bot.sendMessage(chatId, t.messages.explanationSentConfirmation);
+}
+
+// Saves the mentee's rating (+ optional comment) for one accepted mentorship.
+// The score always counts toward the mentor's public average; a comment
+// needs both the mentor's and an admin's approval before it's shown, so if
+// one was given we notify both with Approve/Reject buttons.
+async function finalizeFeedback(chatId: number, telegramId: string, requestId: number, score: number, comment: string | null) {
+  const request = await prisma.mentorshipRequest.findUnique({
+    where: { id: requestId },
+    include: { mentorProfile: { include: { user: true } }, menteeProfile: { include: { user: true } } },
+  });
+  if (!request) return;
+
+  const trimmedComment = comment ? comment.slice(0, MAX_FEEDBACK_COMMENT_LENGTH) : null;
+
+  const feedback = await prisma.mentorFeedback.create({
+    data: {
+      mentorshipRequestId: requestId,
+      mentorProfileId: request.mentorProfileId,
+      menteeProfileId: request.menteeProfileId,
+      score,
+      comment: trimmedComment,
+      // No comment means nothing needs review — treat it as trivially approved.
+      mentorApproved: trimmedComment ? null : true,
+      adminApproved: trimmedComment ? null : true,
+    },
+  });
+
+  const mt = getTexts(request.menteeProfile.user.language);
+  await bot.sendMessage(chatId, mt.messages.feedbackThanks);
+  if (!trimmedComment) return;
+
+  const mentorT = getTexts(request.mentorProfile.user.language);
+  await bot.sendMessage(Number(request.mentorProfile.user.telegramId), format(mentorT.messages.feedbackMentorApprovalRequest, {
+    menteeName: request.menteeProfile.name,
+    score: String(score),
+    comment: trimmedComment,
+  }), {
+    reply_markup: {
+      inline_keyboard: [[
+        { text: mentorT.messages.feedbackApprove, callback_data: `feedback_mentor_approve:${feedback.id}` },
+        { text: mentorT.messages.feedbackReject, callback_data: `feedback_mentor_reject:${feedback.id}` },
+      ]],
+    },
+  }).catch((err) => console.error('Failed to notify mentor about feedback:', err));
+
+  for (const adminId of adminIds) {
+    const adminUser = await prisma.user.findUnique({ where: { telegramId: adminId } });
+    const at = getTexts(adminUser?.language);
+    await bot.sendMessage(Number(adminId), format(at.messages.feedbackAdminApprovalRequest, {
+      mentorName: request.mentorProfile.name,
+      menteeName: request.menteeProfile.name,
+      score: String(score),
+      comment: trimmedComment,
+    }), {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: at.messages.feedbackApprove, callback_data: `feedback_admin_approve:${feedback.id}` },
+          { text: at.messages.feedbackReject, callback_data: `feedback_admin_reject:${feedback.id}` },
+        ]],
+      },
+    }).catch((err) => console.error('Failed to notify admin about feedback:', err));
+  }
 }
 
 
@@ -2026,6 +2177,63 @@ bot.on('callback_query', async (callbackQuery) => {
     }
     return;
   }
+
+  // ── Feedback: mentee rates a mentor for one accepted request ──
+  if (data.startsWith('feedback_score:')) {
+    if (!chatId) return;
+    const [, requestIdStr, scoreStr] = data.split(':');
+    const requestId = Number(requestIdStr);
+    const score = Number(scoreStr);
+    const request = await prisma.mentorshipRequest.findUnique({
+      where: { id: requestId },
+      include: { menteeProfile: { include: { user: true } }, mentorProfile: true, feedback: true },
+    });
+    // Ignore taps from anyone but the mentee this request belongs to, and
+    // ignore a request that's already been rated.
+    if (!request || request.feedback || request.menteeProfile.user.telegramId !== telegramId) return;
+
+    pendingFeedbackComment.set(telegramId, { requestId, score });
+    const mt = getTexts(request.menteeProfile.user.language);
+    await bot.sendMessage(chatId, format(mt.messages.feedbackAskComment, { mentorName: request.mentorProfile.name }), {
+      reply_markup: { inline_keyboard: [[{ text: mt.ui.skip, callback_data: `feedback_comment_skip:${requestId}` }]] },
+    });
+    return;
+  }
+
+  if (data.startsWith('feedback_comment_skip:')) {
+    if (!chatId) return;
+    const requestId = Number(data.slice('feedback_comment_skip:'.length));
+    const pending = pendingFeedbackComment.get(telegramId);
+    if (!pending || pending.requestId !== requestId) return;
+    pendingFeedbackComment.delete(telegramId);
+    await finalizeFeedback(chatId, telegramId, requestId, pending.score, null);
+    return;
+  }
+
+  // ── Feedback: mentor approves/rejects a comment about themselves ──
+  if (data.startsWith('feedback_mentor_approve:') || data.startsWith('feedback_mentor_reject:')) {
+    if (!chatId) return;
+    const approve = data.startsWith('feedback_mentor_approve:');
+    const feedbackId = Number(data.slice((approve ? 'feedback_mentor_approve:' : 'feedback_mentor_reject:').length));
+    const feedback = await prisma.mentorFeedback.findUnique({ where: { id: feedbackId }, include: { mentorProfile: { include: { user: true } } } });
+    if (!feedback || feedback.mentorProfile.user.telegramId !== telegramId) return;
+    await prisma.mentorFeedback.update({ where: { id: feedbackId }, data: { mentorApproved: approve } });
+    const mt = getTexts(feedback.mentorProfile.user.language);
+    await bot.sendMessage(chatId, approve ? mt.messages.feedbackApprovedByYou : mt.messages.feedbackRejectedByYou);
+    return;
+  }
+
+  // ── Feedback: admin approves/rejects a comment ──
+  if (data.startsWith('feedback_admin_approve:') || data.startsWith('feedback_admin_reject:')) {
+    if (!chatId || !adminIds.has(telegramId)) return;
+    const approve = data.startsWith('feedback_admin_approve:');
+    const feedbackId = Number(data.slice((approve ? 'feedback_admin_approve:' : 'feedback_admin_reject:').length));
+    const feedback = await prisma.mentorFeedback.findUnique({ where: { id: feedbackId } });
+    if (!feedback) return;
+    await prisma.mentorFeedback.update({ where: { id: feedbackId }, data: { adminApproved: approve } });
+    await bot.sendMessage(chatId, approve ? t.messages.feedbackApprovedByYou : t.messages.feedbackRejectedByYou);
+    return;
+  }
 });
 
 // ── Text message handler ──────────────────────────────────────────────────────
@@ -2065,11 +2273,19 @@ bot.on('message', async (msg: Message) => {
   if (menuAction) {
     userStates.delete(telegramId);
     pendingMentorExplanation.delete(telegramId);
+    pendingFeedbackComment.delete(telegramId);
     await menuAction(msg);
     return;
   }
 
   if (pendingMentorExplanation.has(telegramId)) { await handleMentorExplanationText(msg); return; }
+
+  const pendingFeedback = pendingFeedbackComment.get(telegramId);
+  if (pendingFeedback) {
+    pendingFeedbackComment.delete(telegramId);
+    await finalizeFeedback(chatId, telegramId, pendingFeedback.requestId, pendingFeedback.score, text.trim());
+    return;
+  }
 
   const state = userStates.get(telegramId);
   if (!state) return;
@@ -2182,10 +2398,31 @@ async function checkUnclaimedMentorSearchRequests() {
   }
 }
 
+const FEEDBACK_PROMPT_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
+const FEEDBACK_PROMPT_DELAY_MS = 3 * 24 * 60 * 60 * 1000; // ask 3 days after acceptance
+
+async function checkFeedbackPrompts() {
+  const cutoff = new Date(Date.now() - FEEDBACK_PROMPT_DELAY_MS);
+  const dueRequests = await prisma.mentorshipRequest.findMany({
+    where: { status: 'ACCEPTED', feedbackRequestedAt: null, updatedAt: { lte: cutoff } },
+    include: { mentorProfile: true, menteeProfile: { include: { user: true } } },
+  });
+  for (const request of dueRequests) {
+    const menteeUser = request.menteeProfile.user;
+    const mt = getTexts(menteeUser.language);
+    await bot.sendMessage(Number(menteeUser.telegramId), format(mt.messages.feedbackPrompt, { mentorName: request.mentorProfile.name }), {
+      reply_markup: buildFeedbackScoreKeyboard(request.id),
+    }).catch((err) => console.error('Failed to send feedback prompt:', err));
+    await prisma.mentorshipRequest.update({ where: { id: request.id }, data: { feedbackRequestedAt: new Date() } });
+  }
+}
+
 setInterval(() => { checkBusyReminders().catch((err) => console.error('checkBusyReminders failed:', err)); }, BUSY_REMINDER_CHECK_INTERVAL_MS);
 setInterval(() => { checkUnclaimedMentorSearchRequests().catch((err) => console.error('checkUnclaimedMentorSearchRequests failed:', err)); }, STALE_SEARCH_REQUEST_CHECK_INTERVAL_MS);
+setInterval(() => { checkFeedbackPrompts().catch((err) => console.error('checkFeedbackPrompts failed:', err)); }, FEEDBACK_PROMPT_CHECK_INTERVAL_MS);
 // Also run shortly after startup, in case reminders were due while the bot was down.
 setTimeout(() => { checkBusyReminders().catch((err) => console.error('checkBusyReminders failed:', err)); }, 30_000);
 setTimeout(() => { checkUnclaimedMentorSearchRequests().catch((err) => console.error('checkUnclaimedMentorSearchRequests failed:', err)); }, 30_000);
+setTimeout(() => { checkFeedbackPrompts().catch((err) => console.error('checkFeedbackPrompts failed:', err)); }, 30_000);
 
 app.listen(port, () => console.log(`Server listening on port ${port}`));
