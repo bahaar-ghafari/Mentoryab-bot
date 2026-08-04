@@ -41,6 +41,7 @@ export const texts = {
     contactPhone: '📱 Enter your phone number (e.g. +1234567890):',
     contactEmail: '📧 Enter your email address:',
     goals: '🎯 What are your learning goals?',
+    editSpokenLanguage: '🌐 What language do you speak with mentees/mentors? This is used for matching and filters — it won\'t change the bot\'s display language (use /language for that).',
   },
   messages: {
     useButtons: 'Please use the buttons to make your selection.',

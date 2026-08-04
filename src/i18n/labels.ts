@@ -58,6 +58,24 @@ export const CONTACT_LABELS_FA: Record<ContactType, string> = {
   email: '📧 ایمیل',
 };
 
+// Iran uses the Sun and Lion emblem instead of its current national flag emoji.
+const COUNTRY_FLAGS: Record<string, string> = {
+  Iran: '☀️🦁',
+  'United States': '🇺🇸',
+  'United Kingdom': '🇬🇧',
+  Canada: '🇨🇦',
+  Australia: '🇦🇺',
+  Germany: '🇩🇪',
+  France: '🇫🇷',
+  Netherlands: '🇳🇱',
+  Sweden: '🇸🇪',
+  UAE: '🇦🇪',
+  Turkey: '🇹🇷',
+  India: '🇮🇳',
+  Pakistan: '🇵🇰',
+  Other: '🌍',
+};
+
 type OptionKind = 'skill' | 'title' | 'country';
 
 const LABEL_MAPS: Record<Exclude<Locale, 'en'>, Record<OptionKind, Record<string, string>>> = {
@@ -69,8 +87,12 @@ const LABEL_MAPS: Record<Exclude<Locale, 'en'>, Record<OptionKind, Record<string
 };
 
 export function translateOption(locale: Locale, value: string, kind: OptionKind): string {
-  if (locale === 'en') return value;
-  return LABEL_MAPS[locale]?.[kind]?.[value] ?? value;
+  const label = locale === 'en' ? value : (LABEL_MAPS[locale]?.[kind]?.[value] ?? value);
+  if (kind === 'country') {
+    const flag = COUNTRY_FLAGS[value];
+    return flag ? `${flag} ${label}` : label;
+  }
+  return label;
 }
 
 export function getContactLabels(locale: Locale): Record<ContactType, string> {

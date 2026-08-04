@@ -598,6 +598,10 @@ async function saveEditedFieldAndReturnToProfile(chatId: number, telegramId: str
       updateData.title = state.profile.title || null;
     } else if (field === 'goals' && state.role === 'mentee') {
       updateData.goals = state.profile.goals || null;
+    } else if (field === 'language') {
+      // The profile's spoken language, used for matching/filters — distinct
+      // from the UI text locale (state.language), which is untouched here.
+      updateData.language = state.profile.language;
     } else if (field === 'skills') {
       const skillsArr = (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean);
       updateData = state.role === 'mentor' ? { skills: skillsArr } : { skillsNeeded: skillsArr };
@@ -923,7 +927,7 @@ function buildActiveFiltersSummary(browseState: MentorBrowseState, t: Texts): { 
   const labels: string[] = [];
   if (browseState.language) labels.push(`🌐 ${languageDisplayName(browseState.language)}`);
   if (browseState.title) labels.push(`💼 ${translateOption(t.locale, browseState.title, 'title')}`);
-  if (browseState.country) labels.push(`🌍 ${translateOption(t.locale, browseState.country, 'country')}`);
+  if (browseState.country) labels.push(translateOption(t.locale, browseState.country, 'country'));
   const text = labels.length ? format(t.browse.activeFilters, { filters: labels.join(', ') }) : t.browse.noFiltersApplied;
   return { labels, text };
 }
@@ -1238,19 +1242,20 @@ bot.on('callback_query', async (callbackQuery) => {
     const code = data.slice('language:'.length);
     if (!isLocale(code)) return;
 
+    // Editing the profile's spoken language (used for matching/filters) is
+    // separate from the UI text locale — do NOT touch User.language or
+    // state.language here; only /language (or the onboarding step) does that.
+    if (state?.editingField === 'language') {
+      state.profile.language = code;
+      await saveEditedFieldAndReturnToProfile(chatId, telegramId, state);
+      return;
+    }
+
     await prisma.user.upsert({
       where: { telegramId },
       update: { language: code },
       create: { telegramId, language: code },
     });
-
-    if (state?.editingField === 'language') {
-      state.language = code;
-      await logProfileAudit(telegramId, state.role === 'mentor' ? 'MENTOR' : 'MENTEE', 'UPDATE', telegramId, { field: 'language', newValue: code });
-      userStates.delete(telegramId);
-      await showProfileView(chatId, telegramId);
-      return;
-    }
 
     const isOnboardingLanguageStep = !!state && ONBOARDING_STEPS[state.role][state.stepIndex] === 'language';
     if (state && isOnboardingLanguageStep) {
@@ -1450,7 +1455,8 @@ bot.on('callback_query', async (callbackQuery) => {
     userStates.set(telegramId, editState);
 
     if (field === 'language') {
-      await bot.sendMessage(chatId, `🌐 ${LOCALE_TEXTS.en.prompts.language}\n${LOCALE_TEXTS.fa.prompts.language}`, {
+      const editT = getTexts(editState.language);
+      await bot.sendMessage(chatId, editT.prompts.editSpokenLanguage, {
         reply_markup: buildLanguageInlineKeyboard(),
       });
       return;
@@ -1552,7 +1558,7 @@ bot.on('callback_query', async (callbackQuery) => {
     if (state.editingField) {
       // Clear rather than keep the pre-populated existing value — Skip means
       // "no value", same as during onboarding.
-      delete state.profile[ONBOARDING_STEPS[state.role][state.stepIndex]];
+      delete state.profile[state.editingField];
     }
     await advanceOrFinish(chatId, telegramId, state);
     return;
@@ -1804,8 +1810,9 @@ bot.on('message', async (msg: Message) => {
     return;
   }
 
-  // Normal text step
-  const currentStep = ONBOARDING_STEPS[state.role][state.stepIndex] as OnboardingStep;
+  // Normal text step — when editing a single existing field, that field IS
+  // the current step regardless of stepIndex (which stays 0 for edits).
+  const currentStep = (state.editingField ?? ONBOARDING_STEPS[state.role][state.stepIndex]) as OnboardingStep;
 
   // Contact step: awaiting a typed value for a chosen contact type
   if (currentStep === 'contact') {

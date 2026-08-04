@@ -5,17 +5,29 @@ import { CONTACT_LABELS } from '../contact.js';
 describe('translateOption', () => {
   it('returns the canonical value unchanged for English', () => {
     expect(translateOption('en', 'Design', 'skill')).toBe('Design');
-    expect(translateOption('en', 'Iran', 'country')).toBe('Iran');
   });
 
   it('translates known canonical values to Farsi', () => {
     expect(translateOption('fa', 'Design', 'skill')).toBe('طراحی');
-    expect(translateOption('fa', 'Iran', 'country')).toBe('ایران');
     expect(translateOption('fa', 'Mobile Engineer', 'title')).toBe('مهندس موبایل');
   });
 
   it('falls back to the canonical value for unmapped/custom entries', () => {
     expect(translateOption('fa', 'Quantum Computing', 'skill')).toBe('Quantum Computing');
+  });
+
+  it('prefixes countries with a flag emoji, in every locale', () => {
+    expect(translateOption('en', 'United States', 'country')).toBe('🇺🇸 United States');
+    expect(translateOption('fa', 'United States', 'country')).toBe('🇺🇸 ایالات متحده');
+  });
+
+  it('uses the Sun and Lion emblem for Iran instead of its national flag', () => {
+    expect(translateOption('en', 'Iran', 'country')).toBe('☀️🦁 Iran');
+    expect(translateOption('fa', 'Iran', 'country')).toBe('☀️🦁 ایران');
+  });
+
+  it('falls back to the plain label for a country with no mapped flag', () => {
+    expect(translateOption('en', 'Atlantis', 'country')).toBe('Atlantis');
   });
 });
 
