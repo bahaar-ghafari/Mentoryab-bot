@@ -16,12 +16,12 @@ import {
 } from './contact.js';
 
 const ONBOARDING_STEPS = {
-  mentor: ['language', 'name', 'title', 'skills', 'experience', 'country', 'city', 'contact'],
-  mentee: ['language', 'name', 'goals', 'skills', 'experience', 'country', 'city'],
+  mentor: ['language', 'name', 'title', 'skills', 'experience', 'country', 'contact'],
+  mentee: ['language', 'name', 'goals', 'skills', 'experience', 'country'],
 } as const;
 
 type OnboardingStep = typeof ONBOARDING_STEPS['mentor'][number] | typeof ONBOARDING_STEPS['mentee'][number];
-type SubStep = 'year' | 'month';
+type SubStep = 'year';
 
 interface UserState {
   role: 'mentor' | 'mentee';
@@ -51,8 +51,6 @@ const prisma = new PrismaClient();
 const port = Number(process.env.PORT || 3000);
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const adminIds = new Set((process.env.ADMIN_TELEGRAM_IDS || '').split(',').map((s) => s.trim()).filter(Boolean));
-
-const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 function format(text: string, values: Record<string, string | number> = {}) {
   return text.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ''));
@@ -85,6 +83,48 @@ async function isContactValueTaken(type: ContactType, value: string, currentTele
     where: { [field]: value, user: { telegramId: { not: currentTelegramId } } },
   });
   return !!existing;
+}
+
+// Shared by both the typed-text path and the "confirm detected username"
+// button — records one contact value and re-renders the type picker with
+// the updated summary, either by editing the tracked message or falling
+// back to a fresh one.
+async function saveContactValueAndShowSummary(
+  chatId: number,
+  telegramId: string,
+  state: UserState,
+  type: ContactType,
+  value: string,
+  t: Texts
+): Promise<boolean> {
+  const labels = getContactLabels(state.language);
+  if (await isContactValueTaken(type, value, state.targetTelegramId ?? telegramId)) {
+    await bot.sendMessage(chatId, format(t.messages.contactTaken, { contactType: labels[type] }));
+    return false;
+  }
+  if (!state.contactMethods) state.contactMethods = {};
+  state.contactMethods[type] = value;
+  state.awaitingContactType = undefined;
+  const collected = state.contactMethods;
+  const all: ContactType[] = ['telegram', 'phone', 'email'];
+  const remaining = all.filter((ct) => !collected[ct]);
+  const collectedStr = renderCollectedContacts(collected, labels);
+  const prompt = remaining.length > 0
+    ? `${collectedStr}\n\n${t.messages.addAnotherContact}`
+    : `${collectedStr}\n\n${t.messages.allContactMethodsAdded}`;
+  try {
+    await bot.editMessageText(prompt, {
+      chat_id: chatId,
+      message_id: state.currentMessageId,
+      reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0, labels, { back: t.ui.back, done: t.ui.done }),
+    });
+  } catch {
+    const sent = await bot.sendMessage(chatId, prompt, {
+      reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0, labels, { back: t.ui.back, done: t.ui.done }),
+    });
+    state.currentMessageId = (sent as Message).message_id;
+  }
+  return true;
 }
 
 // Records every profile create/update/delete for the admin /history command.
@@ -185,20 +225,6 @@ function buildYearKeyboard(canGoBack: boolean, t: Texts) {
   return { inline_keyboard: rows };
 }
 
-function buildMonthKeyboard(year: string, t: Texts) {
-  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
-  for (let i = 0; i < 12; i += 4) {
-    rows.push(
-      MONTH_SHORT.slice(i, i + 4).map((m, j) => ({
-        text: m,
-        callback_data: `startmonth:${year}:${String(i + j + 1).padStart(2, '0')}`,
-      }))
-    );
-  }
-  rows.push([{ text: t.ui.backToYears, callback_data: 'back_to_years' }]);
-  return { inline_keyboard: rows };
-}
-
 function buildCountryInlineKeyboard(canGoBack: boolean, t: Texts) {
   const options = t.countryOptions.filter((c) => c !== 'Other');
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
@@ -261,11 +287,9 @@ function buildBusyDatePresetsKeyboard(t: Texts) {
   };
 }
 
-function calcExperienceYears(startDateStr: string): number {
-  const [year, month] = startDateStr.split('-').map(Number);
-  const now = new Date();
-  const years = now.getFullYear() - year;
-  return Math.max(0, now.getMonth() + 1 < month ? years - 1 : years);
+function calcExperienceYears(startYearStr: string): number {
+  const year = Number(startYearStr);
+  return Math.max(0, new Date().getFullYear() - year);
 }
 
 // ── Core step renderer ────────────────────────────────────────────────────────
@@ -315,15 +339,6 @@ async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee',
       text = t.prompts.country;
       reply_markup = buildCountryInlineKeyboard(canGoBack, t);
       break;
-
-    case 'city': {
-      text = t.prompts.city;
-      const cityNav: Array<{ text: string; callback_data: string }> = [];
-      if (canGoBack) cityNav.push({ text: t.ui.back, callback_data: 'back' });
-      cityNav.push({ text: t.ui.skip, callback_data: 'skip' });
-      reply_markup = { inline_keyboard: [cityNav] };
-      break;
-    }
 
     case 'contact': {
       const collected = state.contactMethods || {};
@@ -378,10 +393,7 @@ async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee',
 async function finishOnboarding(chatId: number, telegramId: string, state: UserState) {
   const t = getTexts(state.language);
   const roleText = state.role === 'mentor' ? t.summary.roleMentor : t.summary.roleMentee;
-  const location =
-    state.profile.city && state.profile.country
-      ? `${state.profile.city}, ${state.profile.country}`
-      : state.profile.country || state.profile.city || null;
+  const location = state.profile.country || null;
   const experienceYears = state.profile.experience ? calcExperienceYears(state.profile.experience) : 0;
   const isMentorNow = state.role === 'mentor';
 
@@ -406,7 +418,6 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
     skills: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
     experienceYears,
     country: state.profile.country || null,
-    city: state.profile.city || null,
     location,
     contactMethods,
     telegramContact: state.contactMethods?.telegram || null,
@@ -421,7 +432,6 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
     skillsNeeded: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
     experienceYears,
     country: state.profile.country || null,
-    city: state.profile.city || null,
     location,
     language: state.language,
   };
@@ -476,9 +486,6 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
     .join(', ');
   const displayTitle = state.profile.title ? translateOption(state.language, state.profile.title, 'title') : null;
   const displayCountry = state.profile.country ? translateOption(state.language, state.profile.country, 'country') : null;
-  const displayLocation = state.profile.city && displayCountry
-    ? `${state.profile.city}, ${displayCountry}`
-    : displayCountry || state.profile.city || null;
 
   const contactLabels = getContactLabels(state.language);
   const contactSummary = renderContactMethodsSummary(state.contactMethods, contactLabels);
@@ -487,7 +494,7 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
     displayTitle ? `${t.summary.title}: ${displayTitle}` : null,
     `${t.summary.skills}: ${displaySkills}`,
     state.profile.experience ? `${t.summary.careerStart}: ${state.profile.experience}` : null,
-    displayLocation ? `${t.summary.location}: ${displayLocation}` : null,
+    displayCountry ? `${t.summary.location}: ${displayCountry}` : null,
     `${t.summary.language}: ${languageDisplayName(state.language)}`,
     contactSummary ? `${t.summary.contact}: ${contactSummary}` : null,
     state.profile.goals ? `${t.summary.goals}: ${state.profile.goals}` : null,
@@ -535,8 +542,8 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
 
 // ── Profile view (Edit Profile) ───────────────────────────────────────────────
 
-const MENTOR_PROFILE_FIELDS = ['name', 'title', 'skills', 'experience', 'country', 'city', 'contact', 'language'] as const;
-const MENTEE_PROFILE_FIELDS = ['name', 'goals', 'skills', 'experience', 'country', 'city', 'language'] as const;
+const MENTOR_PROFILE_FIELDS = ['name', 'title', 'skills', 'experience', 'country', 'contact', 'language'] as const;
+const MENTEE_PROFILE_FIELDS = ['name', 'goals', 'skills', 'experience', 'country', 'language'] as const;
 
 function buildFieldEditKeyboard(
   role: 'mentor' | 'mentee',
@@ -662,7 +669,6 @@ async function renderProfileView(chatId: number, telegramId: string, role: 'ment
     `${t.summary.skills}: ${displaySkills}`,
     `${t.summary.experience}: ${format(t.summary.yearsLabel, { n: profile.experienceYears ?? 0 })}`,
     displayCountry ? `${t.summary.country}: ${displayCountry}` : null,
-    profile.city ? `${t.summary.city}: ${profile.city}` : null,
     `${t.summary.language}: ${languageDisplayName(profile.language)}`,
     mentor && mentor.contactMethods.length ? `${t.summary.contact}: ${mentor.contactMethods.join(', ')}` : null,
     mentee?.goals ? `${t.summary.goals}: ${mentee.goals}` : null,
@@ -699,7 +705,6 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
   let name: string;
   let experienceYears: number | null;
   let country: string | null;
-  let city: string | null;
   let language: string;
   let skills: string[];
   let displayTitle: string | null = null;
@@ -710,7 +715,7 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
   if (role === 'mentor') {
     const profile = await prisma.mentorProfile.findUnique({ where: { id: profileId } });
     if (!profile) { await bot.sendMessage(chatId, t.admin.profileNotFound); return; }
-    ({ name, experienceYears, country, city, language } = profile);
+    ({ name, experienceYears, country, language } = profile);
     skills = profile.skills;
     displayTitle = profile.title ? translateOption(t.locale, profile.title, 'title') : null;
     contactSummary = profile.contactMethods.length ? profile.contactMethods.join(', ') : null;
@@ -718,7 +723,7 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
   } else {
     const profile = await prisma.menteeProfile.findUnique({ where: { id: profileId } });
     if (!profile) { await bot.sendMessage(chatId, t.admin.profileNotFound); return; }
-    ({ name, experienceYears, country, city, language } = profile);
+    ({ name, experienceYears, country, language } = profile);
     skills = profile.skillsNeeded;
     goals = profile.goals;
   }
@@ -732,7 +737,6 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
     `${t.summary.skills}: ${displaySkills}`,
     `${t.summary.experience}: ${format(t.summary.yearsLabel, { n: experienceYears ?? 0 })}`,
     displayCountry ? `${t.summary.country}: ${displayCountry}` : null,
-    city ? `${t.summary.city}: ${city}` : null,
     `${t.summary.language}: ${languageDisplayName(language)}`,
     contactSummary ? `${t.summary.contact}: ${contactSummary}` : null,
     goals ? `${t.summary.goals}: ${goals}` : null,
@@ -799,11 +803,8 @@ async function saveEditedFieldAndReturnToProfile(chatId: number, telegramId: str
       updateData = state.role === 'mentor' ? { skills: skillsArr } : { skillsNeeded: skillsArr };
     } else if (field === 'experience') {
       updateData.experienceYears = state.profile.experience ? calcExperienceYears(state.profile.experience) : 0;
-    } else if (field === 'country' || field === 'city') {
-      const location = state.profile.city && state.profile.country
-        ? `${state.profile.city}, ${state.profile.country}`
-        : state.profile.country || state.profile.city || null;
-      updateData = { [field]: state.profile[field] || null, location };
+    } else if (field === 'country') {
+      updateData = { country: state.profile.country || null, location: state.profile.country || null };
     } else if (field === 'contact' && state.role === 'mentor') {
       const contactMethods = state.contactMethods
         ? (Object.entries(state.contactMethods) as Array<[ContactType, string]>).map(([type, value]) => `${CONTACT_LABELS[type]}: ${value}`)
@@ -987,8 +988,8 @@ bot.onText(/^\/deletementee\s*$/, async (msg: Message) => {
   await bot.sendMessage(msg.chat.id, getTexts(admin?.language).admin.deleteMenteeUsage);
 });
 
-const MENTOR_EDITABLE_FIELDS = ['name', 'title', 'skills', 'experienceYears', 'country', 'city', 'availability', 'telegramContact', 'phoneContact', 'emailContact'] as const;
-const MENTEE_EDITABLE_FIELDS = ['name', 'goals', 'skillsNeeded', 'experienceYears', 'country', 'city'] as const;
+const MENTOR_EDITABLE_FIELDS = ['name', 'title', 'skills', 'experienceYears', 'country', 'availability', 'telegramContact', 'phoneContact', 'emailContact'] as const;
+const MENTEE_EDITABLE_FIELDS = ['name', 'goals', 'skillsNeeded', 'experienceYears', 'country'] as const;
 
 bot.onText(/^\/editmentor(?:\s+([\s\S]+))?$/, async (msg: Message, match: RegExpMatchArray | null) => {
   const telegramId = String(msg.from?.id);
@@ -1800,7 +1801,6 @@ bot.on('callback_query', async (callbackQuery) => {
         goals: mentee?.goals || '',
         skills: skills.join(', '),
         country: profileForRole.country || '',
-        city: profileForRole.city || '',
       },
       selectedSkills: [...skills],
       language: isLocale(user.language) ? user.language : 'en',
@@ -1915,7 +1915,6 @@ bot.on('callback_query', async (callbackQuery) => {
           goals: '',
           skills: profile.skills.join(', '),
           country: profile.country || '',
-          city: profile.city || '',
         },
         selectedSkills: [...profile.skills],
         contactMethods: existingContacts,
@@ -1935,7 +1934,6 @@ bot.on('callback_query', async (callbackQuery) => {
           goals: profile.goals || '',
           skills: profile.skillsNeeded.join(', '),
           country: profile.country || '',
-          city: profile.city || '',
         },
         selectedSkills: [...profile.skillsNeeded],
         language: adminLocale,
@@ -2061,11 +2059,31 @@ bot.on('callback_query', async (callbackQuery) => {
       phone: t.prompts.contactPhone,
       email: t.prompts.contactEmail,
     };
-    await bot.editMessageText(prompts[contactType], {
+
+    const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+    let promptText = prompts[contactType];
+    if (contactType === 'telegram') {
+      const targetUser = await prisma.user.findUnique({ where: { telegramId: state.targetTelegramId ?? telegramId } });
+      if (targetUser?.username) {
+        promptText = format(t.prompts.contactTelegramGuessed, { username: targetUser.username });
+        rows.push([{ text: format(t.messages.useDetectedUsername, { username: targetUser.username }), callback_data: `contact_telegram_confirm:${targetUser.username}` }]);
+      }
+    }
+    rows.push([{ text: t.ui.back, callback_data: 'contact_back_to_types' }]);
+
+    await bot.editMessageText(promptText, {
       chat_id: chatId,
       message_id: state.currentMessageId,
-      reply_markup: { inline_keyboard: [[{ text: t.ui.back, callback_data: 'contact_back_to_types' }]] },
+      reply_markup: { inline_keyboard: rows },
     }).catch(() => {});
+    return;
+  }
+
+  // ── Confirm the detected Telegram username instead of typing it ──
+  if (data.startsWith('contact_telegram_confirm:')) {
+    if (!state || !chatId) return;
+    const username = data.slice('contact_telegram_confirm:'.length);
+    await saveContactValueAndShowSummary(chatId, telegramId, state, 'telegram', `@${username}`, t);
     return;
   }
 
@@ -2103,39 +2121,11 @@ bot.on('callback_query', async (callbackQuery) => {
   if (data.startsWith('startyear:')) {
     if (!state || !chatId) return;
     const year = data.split(':')[1];
-    state.profile.startYear = year;
-    state.awaitingSubStep = 'month';
-    await bot.editMessageText(t.prompts.experienceMonth, {
-      chat_id: chatId,
-      message_id: state.currentMessageId,
-      reply_markup: buildMonthKeyboard(year, t),
-    });
-    return;
-  }
-
-  // ── Back to years from month ──
-  if (data === 'back_to_years') {
-    if (!state || !chatId) return;
-    state.awaitingSubStep = 'year';
-    delete state.profile.startYear;
-    await bot.editMessageText(t.prompts.experience, {
-      chat_id: chatId,
-      message_id: state.currentMessageId,
-      reply_markup: buildYearKeyboard(state.stepIndex > 0, t),
-    });
-    return;
-  }
-
-  // ── Month selected ──
-  if (data.startsWith('startmonth:')) {
-    if (!state || !chatId) return;
-    const [, year, monthStr] = data.split(':');
-    const monthName = MONTH_SHORT[Number(monthStr) - 1];
-    state.profile.experience = `${year}-${monthStr}`;
+    state.profile.experience = year;
     state.awaitingSubStep = undefined;
     // Brief confirmation in the message before transitioning
     try {
-      await bot.editMessageText(`${t.summary.careerStart}: ${monthName} ${year}`, {
+      await bot.editMessageText(`${t.summary.careerStart}: ${year}`, {
         chat_id: chatId,
         message_id: state.currentMessageId,
         reply_markup: { inline_keyboard: [] },
@@ -2355,7 +2345,7 @@ bot.on('message', async (msg: Message) => {
   const t = getTexts(state.language);
 
   // Inline keyboard steps — reject freetext
-  if (state.awaitingSubStep === 'year' || state.awaitingSubStep === 'month') {
+  if (state.awaitingSubStep === 'year') {
     await bot.sendMessage(chatId, t.messages.useButtons);
     return;
   }
@@ -2375,33 +2365,7 @@ bot.on('message', async (msg: Message) => {
       await bot.sendMessage(chatId, t.messages.invalidEmail);
       return;
     }
-    const labels = getContactLabels(state.language);
-    if (await isContactValueTaken(state.awaitingContactType, text, state.targetTelegramId ?? telegramId)) {
-      await bot.sendMessage(chatId, format(t.messages.contactTaken, { contactType: labels[state.awaitingContactType] }));
-      return;
-    }
-    if (!state.contactMethods) state.contactMethods = {};
-    state.contactMethods[state.awaitingContactType] = text;
-    state.awaitingContactType = undefined;
-    const collected = state.contactMethods;
-    const all: ContactType[] = ['telegram', 'phone', 'email'];
-    const remaining = all.filter((ct) => !collected[ct]);
-    const collectedStr = renderCollectedContacts(collected, labels);
-    const prompt = remaining.length > 0
-      ? `${collectedStr}\n\n${t.messages.addAnotherContact}`
-      : `${collectedStr}\n\n${t.messages.allContactMethodsAdded}`;
-    try {
-      await bot.editMessageText(prompt, {
-        chat_id: chatId,
-        message_id: state.currentMessageId,
-        reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0, labels, { back: t.ui.back, done: t.ui.done }),
-      });
-    } catch {
-      const sent = await bot.sendMessage(chatId, prompt, {
-        reply_markup: buildContactTypeKeyboard(collected, state.stepIndex > 0, labels, { back: t.ui.back, done: t.ui.done }),
-      });
-      state.currentMessageId = (sent as Message).message_id;
-    }
+    await saveContactValueAndShowSummary(chatId, telegramId, state, state.awaitingContactType, text, t);
     return;
   }
 

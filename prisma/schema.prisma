@@ -44,7 +44,6 @@ model MentorProfile {
   skills          String[]
   experienceYears Int
   country         String?
-  city            String?
   location        String?
   availability    Boolean  @default(true)
   busyUntil       DateTime?
@@ -68,7 +67,6 @@ model MenteeProfile {
   skillsNeeded    String[]
   experienceYears Int?
   country         String?
-  city            String?
   location        String?
   language        String   @default("en")
   createdAt       DateTime @default(now())
