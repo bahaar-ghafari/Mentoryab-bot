@@ -2,6 +2,8 @@ import dotenv from 'dotenv';
 import express from 'express';
 import TelegramBot, { type Message } from 'node-telegram-bot-api';
 import { PrismaClient, Prisma } from '@prisma/client';
+import { existsSync, rmSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { findMentorMatches, canonicalizeSkill } from './matching.js';
 import { getTexts, LOCALE_TEXTS, LANGUAGE_CHOICES, isLocale, type Locale, type Texts } from './i18n/index.js';
 import { translateOption, getContactLabels } from './i18n/labels.js';
@@ -54,6 +56,64 @@ const prisma = new PrismaClient();
 const port = Number(process.env.PORT || 3000);
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const adminIds = new Set((process.env.ADMIN_TELEGRAM_IDS || '').split(',').map((s) => s.trim()).filter(Boolean));
+const mentorGroupChatId = process.env.MENTORS_GROUP_CHAT_ID
+  ? Number(process.env.MENTORS_GROUP_CHAT_ID)
+  : adminIds.size === 1
+    ? Number(adminIds.values().next().value)
+    : undefined;
+const restartMarkerPath = resolve(process.cwd(), '.restart_ready');
+
+function isAdminContext(chatId: number, telegramId: string) {
+  return adminIds.has(telegramId) || (mentorGroupChatId !== undefined && chatId === mentorGroupChatId);
+}
+
+type GroupMember = {
+  telegramId: string;
+  firstName?: string;
+  lastName?: string;
+  username?: string;
+};
+
+const trackedGroupMembers = new Map<string, GroupMember>();
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function mentionGroupUser(user: GroupMember): string {
+  if (user.username) return `@${user.username}`;
+  const name = [user.firstName, user.lastName].filter(Boolean).join(' ') || 'کاربر';
+  return `<a href="tg://user?id=${user.telegramId}">${escapeHtml(name)}</a>`;
+}
+
+function trackGroupMember(user: { id: number | string; first_name?: string; last_name?: string; username?: string; is_bot?: boolean } | undefined) {
+  if (!user || user.is_bot) return;
+  const telegramId = String(user.id);
+  trackedGroupMembers.set(telegramId, {
+    telegramId,
+    firstName: user.first_name,
+    lastName: user.last_name,
+    username: user.username,
+  });
+}
+
+function untrackGroupMember(user: { id: number | string; is_bot?: boolean } | undefined) {
+  if (!user || user.is_bot) return;
+  trackedGroupMembers.delete(String(user.id));
+}
+
+async function getKnownNonMentorGroupMembers(): Promise<GroupMember[]> {
+  const memberIds = Array.from(trackedGroupMembers.keys());
+  if (memberIds.length === 0) return [];
+
+  const users = await prisma.user.findMany({
+    where: { telegramId: { in: memberIds } },
+    include: { mentorProfile: true },
+  });
+
+  const mentors = new Set(users.filter((u) => u.mentorProfile).map((u) => u.telegramId));
+  return Array.from(trackedGroupMembers.values()).filter((member) => !mentors.has(member.telegramId));
+}
 
 function format(text: string, values: Record<string, string | number> = {}) {
   return text.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ''));
@@ -285,6 +345,7 @@ function buildMainMenuKeyboard(hasProfile: boolean, isAdmin: boolean, t: Texts) 
   }
   if (isAdmin) {
     keyboard.push([{ text: t.startMenu.adminMentors }, { text: t.startMenu.adminMentees }]);
+    keyboard.push([{ text: t.startMenu.adminNonMentors }]);
     keyboard.push([{ text: t.startMenu.adminRestart }]);
   }
   keyboard.push([{ text: t.startMenu.help }]);
@@ -990,8 +1051,37 @@ bot.onText(/\/myid/, async (msg: Message) => {
 // resolved to a chat ID via the Bot API.
 bot.onText(/^\/groupid$/, async (msg: Message) => {
   const telegramId = String(msg.from?.id);
-  if (!adminIds.has(telegramId)) return;
+  if (!isAdminContext(msg.chat.id, telegramId)) return;
   await bot.sendMessage(msg.chat.id, `Chat ID: ${msg.chat.id}`);
+});
+
+bot.onText(/^\/nonmentors$/, async (msg: Message) => {
+  const telegramId = String(msg.from?.id);
+  if (!isAdminContext(msg.chat.id, telegramId)) return;
+  await handleAdminNonMentors(msg);
+});
+
+bot.onText(/^\/message_nonmentors(?:\s+([\s\S]+))?$/, async (msg: Message, match: RegExpMatchArray | null) => {
+  const telegramId = String(msg.from?.id);
+  if (!isAdminContext(msg.chat.id, telegramId)) return;
+  const textToSend = match?.[1]?.trim();
+  if (!textToSend) {
+    const admin = await prisma.user.findUnique({ where: { telegramId } });
+    const t = getTexts(admin?.language);
+    await bot.sendMessage(msg.chat.id, t.admin.messageNonMentorsUsage);
+    return;
+  }
+
+  const nonMentors = await getKnownNonMentorGroupMembers();
+  if (!nonMentors.length) {
+    const admin = await prisma.user.findUnique({ where: { telegramId } });
+    const t = getTexts(admin?.language);
+    await bot.sendMessage(msg.chat.id, t.admin.noNonMentorsFound);
+    return;
+  }
+
+  const mentionText = nonMentors.map(mentionGroupUser).join(' ');
+  await bot.sendMessage(msg.chat.id, `${mentionText}\n\n${textToSend}`, { parse_mode: 'HTML', disable_web_page_preview: true });
 });
 
 bot.onText(/\/mentors/, async (msg: Message) => {
@@ -1619,6 +1709,25 @@ async function renderAdminMentorsList(chatId: number, telegramId: string) {
   await bot.sendMessage(chatId, t.admin.manageMentorsPrompt, { reply_markup: { inline_keyboard: manageRows } });
 }
 
+async function handleAdminNonMentors(msg: Message) {
+  const telegramId = String(msg.from?.id);
+  if (!adminIds.has(telegramId)) return;
+  const admin = await prisma.user.findUnique({ where: { telegramId } });
+  const t = getTexts(admin?.language);
+  const nonMentors = await getKnownNonMentorGroupMembers();
+  if (!nonMentors.length) {
+    await bot.sendMessage(msg.chat.id, t.admin.noNonMentorsFound);
+    return;
+  }
+
+  const lines = nonMentors.map((member, idx) => {
+    const mention = member.username ? `@${member.username}` : `${member.firstName || 'Unknown'}${member.lastName ? ` ${member.lastName}` : ''}`;
+    return `${idx + 1}. ${mention} (${member.telegramId})`;
+  });
+
+  await bot.sendMessage(msg.chat.id, format(t.admin.nonMentorsHeader, { count: nonMentors.length }) + `\n\n${lines.join('\n')}`);
+}
+
 async function renderAdminMenteesList(chatId: number, telegramId: string) {
   const admin = await prisma.user.findUnique({ where: { telegramId } });
   const t = getTexts(admin?.language);
@@ -1660,9 +1769,26 @@ const handleAdminRestart = async (msg: Message) => {
   if (!adminIds.has(telegramId)) return;
   const admin = await prisma.user.findUnique({ where: { telegramId } });
   const t = getTexts(admin?.language);
+  writeFileSync(restartMarkerPath, telegramId, { encoding: 'utf8' });
   await bot.sendMessage(msg.chat.id, t.admin.restarting);
   setTimeout(() => process.exit(0), 500);
 };
+
+async function sendRestartReadyNotifications() {
+  if (!existsSync(restartMarkerPath)) return;
+  try {
+    for (const telegramId of adminIds) {
+      const admin = await prisma.user.findUnique({ where: { telegramId } });
+      const t = getTexts(admin?.language);
+      await bot.sendMessage(Number(telegramId), t.admin.ready);
+    }
+  } catch (error) {
+    console.error('Failed to send restart ready notification:', error);
+  }
+  rmSync(restartMarkerPath, { force: true });
+}
+
+void sendRestartReadyNotifications();
 
 // ── Callback query handler ────────────────────────────────────────────────────
 
@@ -2464,6 +2590,27 @@ bot.on('callback_query', async (callbackQuery) => {
     return;
   }
 
+  if (data.startsWith('message_nonmentors:')) {
+    if (!chatId || !adminIds.has(telegramId)) return;
+    const textToSend = data.slice('message_nonmentors:'.length);
+    const nonMentors = await getKnownNonMentorGroupMembers();
+    if (!nonMentors.length) {
+      await bot.sendMessage(chatId, t.admin.noNonMentorsFound || 'No known non-mentor group members found.');
+      return;
+    }
+
+    const messageLines = [t.admin.nonMentorsMentionHeader];
+    for (const member of nonMentors) {
+      messageLines.push(mentionGroupUser(member));
+    }
+
+    const messageText = `${messageLines.join(' ')}
+
+${textToSend}`;
+    await bot.sendMessage(chatId, messageText, { parse_mode: 'HTML', disable_web_page_preview: true });
+    return;
+  }
+
   // ── Mentee taps "Check it out" on a new-match notification ──
   if (data === 'newmatch_check') {
     if (!chatId) return;
@@ -2498,6 +2645,7 @@ const MENU_ACTIONS: Array<[keyof Texts['startMenu'], (msg: Message) => Promise<v
   ['help', handleHelp],
   ['adminMentors', handleAdminMentorsList],
   ['adminMentees', handleAdminMenteesList],
+  ['adminNonMentors', handleAdminNonMentors],
   ['adminRestart', handleAdminRestart],
 ];
 
@@ -2509,6 +2657,18 @@ function findMenuAction(text: string): ((msg: Message) => Promise<void>) | null 
 }
 
 bot.on('message', async (msg: Message) => {
+  if (mentorGroupChatId && msg.chat.id === mentorGroupChatId) {
+    trackGroupMember(msg.from);
+    if (msg.new_chat_members) {
+      for (const member of msg.new_chat_members) {
+        trackGroupMember(member);
+      }
+    }
+    if (msg.left_chat_member) {
+      untrackGroupMember(msg.left_chat_member);
+    }
+  }
+
   if (!msg.text || msg.text.startsWith('/')) return;
 
   const text = msg.text;
