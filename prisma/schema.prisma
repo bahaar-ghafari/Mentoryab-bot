@@ -42,6 +42,7 @@ model MentorProfile {
   name            String
   title           String?
   skills          String[]
+  frameworks      String[] @default([])
   experienceYears Int
   country         String?
   location        String?
@@ -152,4 +153,17 @@ model MentorSearchRequest {
   claimedByTelegramId String?
   lastPostedAt        DateTime      @default(now())
   createdAt           DateTime      @default(now())
+}
+
+// Raw snapshot of the mentors Telegram group's member list, as exported via
+// scripts/export_members.py. Kept separate from User since most of these
+// people have never interacted with the bot.
+model GroupMember {
+  id         Int      @id @default(autoincrement())
+  telegramId String   @unique
+  username   String?
+  firstName  String?
+  lastName   String?
+  phone      String?
+  importedAt DateTime @default(now())
 }

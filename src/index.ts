@@ -21,7 +21,7 @@ import {
 } from './contact.js';
 
 const ONBOARDING_STEPS = {
-  mentor: ['language', 'spokenLanguage', 'name', 'title', 'skills', 'experience', 'country', 'contact'],
+  mentor: ['language', 'spokenLanguage', 'name', 'title', 'skills', 'frameworks', 'experience', 'country', 'contact'],
   mentee: ['language', 'spokenLanguage', 'name', 'goals', 'skills', 'experience', 'country'],
 } as const;
 
@@ -432,6 +432,11 @@ async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee',
       break;
     }
 
+    case 'frameworks':
+      text = t.prompts.frameworks;
+      reply_markup = canGoBack ? { inline_keyboard: [[backBtn]] } : { inline_keyboard: [] as unknown[] };
+      break;
+
     case 'experience':
       state.awaitingSubStep = 'year';
       text = t.prompts.experience;
@@ -519,6 +524,7 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
     name: state.profile.name || 'Mentor',
     title: state.profile.title || null,
     skills: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
+    frameworks: (state.profile.frameworks || '').split(',').map((s) => s.trim()).filter(Boolean),
     experienceYears,
     country: state.profile.country || null,
     location,
@@ -598,13 +604,18 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
 
   const contactLabels = getContactLabels(state.language);
   const contactSummary = renderContactMethodsSummary(state.contactMethods, contactLabels);
+  const displayFrameworks = state.profile.frameworks
+    ? state.profile.frameworks.split(',').map((s) => s.trim()).filter(Boolean).join(', ')
+    : null;
+
   const summary = [
     `${t.summary.name}: ${state.profile.name}`,
     displayTitle ? `${t.summary.title}: ${displayTitle}` : null,
     `${t.summary.skills}: ${displaySkills}`,
+    displayFrameworks ? `${t.summary.frameworks}: ${displayFrameworks}` : null,
     state.profile.experience ? `${t.summary.careerStart}: ${state.profile.experience}` : null,
     displayCountry ? `${t.summary.location}: ${displayCountry}` : null,
-    `${t.summary.language}: ${languageDisplayName(state.language)}`,
+    `${t.summary.language}: ${languageDisplayName(state.profile.language || state.language)}`,
     contactSummary ? `${t.summary.contact}: ${contactSummary}` : null,
     state.profile.goals ? `${t.summary.goals}: ${state.profile.goals}` : null,
   ].filter(Boolean).join('\n');
@@ -718,7 +729,7 @@ async function notifyMenteesOfNewMatch(mentorProfileId: number) {
 
 // ── Profile view (Edit Profile) ───────────────────────────────────────────────
 
-const MENTOR_PROFILE_FIELDS = ['name', 'title', 'skills', 'experience', 'country', 'contact', 'language'] as const;
+const MENTOR_PROFILE_FIELDS = ['name', 'title', 'skills', 'frameworks', 'experience', 'country', 'contact', 'language'] as const;
 const MENTEE_PROFILE_FIELDS = ['name', 'goals', 'skills', 'experience', 'country', 'language'] as const;
 
 function buildFieldEditKeyboard(
@@ -884,6 +895,7 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
   let country: string | null;
   let language: string;
   let skills: string[];
+  let frameworks: string[] = [];
   let displayTitle: string | null = null;
   let contactSummary: string | null = null;
   let goals: string | null = null;
@@ -895,6 +907,7 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
     if (!profile) { await bot.sendMessage(chatId, t.admin.profileNotFound); return; }
     ({ name, experienceYears, country, language } = profile);
     skills = profile.skills;
+    frameworks = profile.frameworks;
     displayTitle = profile.title ? translateOption(t.locale, profile.title, 'title') : null;
     contactSummary = profile.contactMethods.length ? profile.contactMethods.join(', ') : null;
     mentorCreatedAt = profile.createdAt;
@@ -910,10 +923,12 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
   const displaySkills = skills.map((s) => translateOption(t.locale, s, 'skill')).join(', ') || t.messages.notAvailable;
   const displayCountry = country ? translateOption(t.locale, country, 'country') : null;
 
+  const displayFrameworks = frameworks.length ? frameworks.join(', ') : null;
   const lines = [
-    `${t.summary.name}: ${name}${role === 'mentor' && !mentorApproved ? ` ${t.messages.mentorApprovalPending}` : ''}`,
-    displayTitle ? `${t.summary.title}: ${displayTitle}` : null,
-    `${t.summary.skills}: ${displaySkills}`,
+      `${t.summary.name}: ${name}${role === 'mentor' && !mentorApproved ? ` ${t.messages.mentorApprovalPending}` : ''}`,
+      displayTitle ? `${t.summary.title}: ${displayTitle}` : null,
+      `${t.summary.skills}: ${displaySkills}`,
+      displayFrameworks ? `${t.summary.frameworks}: ${displayFrameworks}` : null,
     `${t.summary.experience}: ${format(t.summary.yearsLabel, { n: experienceYears ?? 0 })}`,
     displayCountry ? `${t.summary.country}: ${displayCountry}` : null,
     `${t.summary.language}: ${languageDisplayName(language)}`,
@@ -977,6 +992,8 @@ async function saveEditedFieldAndReturnToProfile(chatId: number, telegramId: str
       updateData.name = state.profile.name;
     } else if (field === 'title' && state.role === 'mentor') {
       updateData.title = state.profile.title || null;
+    } else if (field === 'frameworks' && state.role === 'mentor') {
+      updateData.frameworks = (state.profile.frameworks || '').split(',').map((s) => s.trim()).filter(Boolean);
     } else if (field === 'goals' && state.role === 'mentee') {
       updateData.goals = state.profile.goals || null;
     } else if (field === 'language') {
@@ -1202,7 +1219,7 @@ bot.onText(/^\/deletementee\s*$/, async (msg: Message) => {
   await bot.sendMessage(msg.chat.id, getTexts(admin?.language).admin.deleteMenteeUsage);
 });
 
-const MENTOR_EDITABLE_FIELDS = ['name', 'title', 'skills', 'experienceYears', 'country', 'availability', 'telegramContact', 'phoneContact', 'emailContact'] as const;
+const MENTOR_EDITABLE_FIELDS = ['name', 'title', 'skills', 'frameworks', 'experienceYears', 'country', 'availability', 'telegramContact', 'phoneContact', 'emailContact'] as const;
 const MENTEE_EDITABLE_FIELDS = ['name', 'goals', 'skillsNeeded', 'experienceYears', 'country'] as const;
 
 bot.onText(/^\/editmentor(?:\s+([\s\S]+))?$/, async (msg: Message, match: RegExpMatchArray | null) => {
@@ -1243,6 +1260,8 @@ bot.onText(/^\/editmentor(?:\s+([\s\S]+))?$/, async (msg: Message, match: RegExp
     const taken = await prisma.mentorProfile.findFirst({ where: { [field]: normalizedValue, id: { not: id } } });
     if (taken) { await bot.sendMessage(chatId, t.admin.contactFieldTaken); return; }
     value = normalizedValue;
+  } else if (field === 'frameworks') {
+    value = rawValue.split(',').map((s) => s.trim()).filter(Boolean);
   } else {
     value = rawValue;
   }
@@ -2063,6 +2082,7 @@ bot.on('callback_query', async (callbackQuery) => {
       profile: {
         name: profileForRole.name,
         title: mentor?.title || '',
+        frameworks: mentor?.frameworks?.join(', ') || '',
         goals: mentee?.goals || '',
         skills: skills.join(', '),
         country: profileForRole.country || '',

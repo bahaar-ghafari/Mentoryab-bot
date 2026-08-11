@@ -12,10 +12,12 @@ A Telegram-based mentorship bot MVP built with Node.js, TypeScript, Prisma, and 
 - Basic health endpoint
 
 ## Setup
-1. Copy `.env.example` to `.env` and fill in your values.
-2. Create a PostgreSQL database and update `DATABASE_URL`.
-3. Run `npx prisma migrate dev --name init`.
-4. Start the bot with `npm run dev`.
+1. Copy `.env.example` to `.env`, fill in the production values, and keep this file private.
+2. Deploy with the production compose file:
+   ```bash
+docker compose -f docker-compose.prod.yml up -d
+```
+3. The bot image runs `npx prisma migrate deploy` before startup, so migrations are applied automatically.
 
 ## Commands
 - `/start` to begin the experience
@@ -47,3 +49,34 @@ Deploy workflow behavior:
 3. Pull latest repo changes
 4. Pull the updated bot image
 5. Restart only the `bot` service via `docker compose -f docker-compose.prod.yml`
+
+## Database access
+
+Production is the single source of truth. There is no separate staging database — all reads, writes, and imports should target the production Postgres instance, not a local Docker copy.
+
+The `postgres` container on the VPS does not publish a port to the host, so external tools (DBeaver, `psql`, scripts) need an SSH tunnel:
+
+```bash
+# find the container's internal IP first, since it can change on container recreation:
+ssh root@<VPS_HOST> "docker inspect <compose-project>-postgres-1 --format '{{.NetworkSettings.Networks}}'"
+
+# then tunnel a local port to that IP on the VPS:
+ssh -L 5433:<container_ip>:5432 root@<VPS_HOST>
+```
+
+With the tunnel open, point any client (or `DATABASE_URL`) at `localhost:5433`, using the `POSTGRES_USER`/`POSTGRES_PASSWORD` from the VPS's `.env` (never committed — see `/opt/mentoryab-bot/.env` on the server).
+
+## Group member import
+
+To backfill Telegram group members as mentee users in the database:
+
+1. Export the group's member list with `scripts/export_members.py` (requires `telethon`; needs a Telegram API id/hash and creates a local session file — never commit `*.session` files, they're live login credentials):
+   ```bash
+   python scripts/export_members.py <api_id> <api_hash> <group_identifier>
+   ```
+   This writes `group_members.csv` (gitignored — contains real names/usernames/phone numbers).
+2. Import it into the database with `scripts/import_group_members.ts`:
+   ```bash
+   DATABASE_URL=<prod connection string, see "Database access" above> npm run import:group_members
+   ```
+3. Delete `group_members.csv` and the `.session` file locally once the import succeeds — per the policy above, this data should only live in the production database.

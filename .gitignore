@@ -2,8 +2,18 @@ node_modules/
 dist/
 .env
 .env.local
+.env.*.temp
 .DS_Store
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 node_modules
+
+# Telegram group export artifacts - contain PII / live session credentials,
+# never commit; production DB is the only place this data should live.
+*.session
+*.session-journal
+group_members.csv
+
+# Local production DB backups - contain PII, stay local only.
+backups/
