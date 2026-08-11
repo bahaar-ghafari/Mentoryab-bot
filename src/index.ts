@@ -74,8 +74,6 @@ type GroupMember = {
   username?: string;
 };
 
-const trackedGroupMembers = new Map<string, GroupMember>();
-
 function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
@@ -86,33 +84,24 @@ function mentionGroupUser(user: GroupMember): string {
   return `<a href="tg://user?id=${user.telegramId}">${escapeHtml(name)}</a>`;
 }
 
-function trackGroupMember(user: { id: number | string; first_name?: string; last_name?: string; username?: string; is_bot?: boolean } | undefined) {
-  if (!user || user.is_bot) return;
-  const telegramId = String(user.id);
-  trackedGroupMembers.set(telegramId, {
-    telegramId,
-    firstName: user.first_name,
-    lastName: user.last_name,
-    username: user.username,
-  });
-}
-
-function untrackGroupMember(user: { id: number | string; is_bot?: boolean } | undefined) {
-  if (!user || user.is_bot) return;
-  trackedGroupMembers.delete(String(user.id));
-}
-
 async function getKnownNonMentorGroupMembers(): Promise<GroupMember[]> {
-  const memberIds = Array.from(trackedGroupMembers.keys());
-  if (memberIds.length === 0) return [];
+  const groupMembers = await prisma.groupMember.findMany();
+  if (groupMembers.length === 0) return [];
 
   const users = await prisma.user.findMany({
-    where: { telegramId: { in: memberIds } },
+    where: { telegramId: { in: groupMembers.map((m) => m.telegramId) } },
     include: { mentorProfile: true },
   });
 
   const mentors = new Set(users.filter((u) => u.mentorProfile).map((u) => u.telegramId));
-  return Array.from(trackedGroupMembers.values()).filter((member) => !mentors.has(member.telegramId));
+  return groupMembers
+    .filter((member) => !mentors.has(member.telegramId))
+    .map((member) => ({
+      telegramId: member.telegramId,
+      firstName: member.firstName ?? undefined,
+      lastName: member.lastName ?? undefined,
+      username: member.username ?? undefined,
+    }));
 }
 
 function format(text: string, values: Record<string, string | number> = {}) {
@@ -2677,18 +2666,6 @@ function findMenuAction(text: string): ((msg: Message) => Promise<void>) | null 
 }
 
 bot.on('message', async (msg: Message) => {
-  if (mentorGroupChatId && msg.chat.id === mentorGroupChatId) {
-    trackGroupMember(msg.from);
-    if (msg.new_chat_members) {
-      for (const member of msg.new_chat_members) {
-        trackGroupMember(member);
-      }
-    }
-    if (msg.left_chat_member) {
-      untrackGroupMember(msg.left_chat_member);
-    }
-  }
-
   if (!msg.text || msg.text.startsWith('/')) return;
 
   const text = msg.text;
