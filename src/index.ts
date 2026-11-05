@@ -9,6 +9,7 @@ import { getTexts, LOCALE_TEXTS, LANGUAGE_CHOICES, isLocale, type Locale, type T
 import { translateOption, getContactLabels } from './i18n/labels.js';
 import { SKILL_OPTIONS } from './i18n/options.js';
 import { matchesMenuButton } from './i18n/menuButtons.js';
+import { chunkMentions } from './mentions.js';
 import {
   ContactType,
   CONTACT_LABELS,
@@ -102,6 +103,25 @@ async function getKnownNonMentorGroupMembers(): Promise<GroupMember[]> {
       lastName: member.lastName ?? undefined,
       username: member.username ?? undefined,
     }));
+}
+
+// Sends `text` plus mentions of every member, split across several messages if
+// needed to stay under Telegram's length cap. Text goes in the first message;
+// the rest reply to it. Returns the number of messages sent.
+async function sendMentionBroadcast(chatId: number, members: GroupMember[], text: string): Promise<number> {
+  const body = escapeHtml(text);
+  const chunks = chunkMentions(members.map(mentionGroupUser), body.length);
+  let firstMessageId: number | undefined;
+  for (let i = 0; i < chunks.length; i++) {
+    const mentions = chunks[i].join(' ');
+    const sent = await bot.sendMessage(chatId, i === 0 ? `${mentions}\n\n${body}` : mentions, {
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      ...(i > 0 && firstMessageId ? { reply_to_message_id: firstMessageId } : {}),
+    });
+    if (i === 0) firstMessageId = sent.message_id;
+  }
+  return chunks.length;
 }
 
 function format(text: string, values: Record<string, string | number> = {}) {
@@ -1086,8 +1106,7 @@ bot.onText(/^\/message_nonmentors(?:\s+([\s\S]+))?$/, async (msg: Message, match
     return;
   }
 
-  const mentionText = nonMentors.map(mentionGroupUser).join(' ');
-  await bot.sendMessage(msg.chat.id, `${mentionText}\n\n${textToSend}`, { parse_mode: 'HTML', disable_web_page_preview: true });
+  await sendMentionBroadcast(msg.chat.id, nonMentors, textToSend);
 });
 
 bot.onText(/\/mentors/, async (msg: Message) => {
@@ -2608,15 +2627,7 @@ bot.on('callback_query', async (callbackQuery) => {
       return;
     }
 
-    const messageLines = [t.admin.nonMentorsMentionHeader];
-    for (const member of nonMentors) {
-      messageLines.push(mentionGroupUser(member));
-    }
-
-    const messageText = `${messageLines.join(' ')}
-
-${textToSend}`;
-    await bot.sendMessage(chatId, messageText, { parse_mode: 'HTML', disable_web_page_preview: true });
+    await sendMentionBroadcast(chatId, nonMentors, textToSend);
     return;
   }
 
