@@ -1752,7 +1752,18 @@ async function handleAdminNonMentors(msg: Message) {
     return `${idx + 1}. ${mention} (${member.telegramId})`;
   });
 
-  await bot.sendMessage(msg.chat.id, format(t.admin.nonMentorsHeader, { count: nonMentors.length }) + `\n\n${lines.join('\n')}`);
+  // Telegram caps messages at 4096 chars, so send the list in pages.
+  const pages: string[] = [];
+  let page = format(t.admin.nonMentorsHeader, { count: nonMentors.length }) + '\n';
+  for (const line of lines) {
+    if (page.length + line.length + 1 > 3900) {
+      pages.push(page);
+      page = '';
+    }
+    page += `\n${line}`;
+  }
+  pages.push(page);
+  for (const p of pages) await bot.sendMessage(msg.chat.id, p);
 }
 
 async function renderAdminMenteesList(chatId: number, telegramId: string) {
