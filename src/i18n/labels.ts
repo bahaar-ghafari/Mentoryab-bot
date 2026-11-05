@@ -35,6 +35,22 @@ const TITLE_LABELS_FA: Record<string, string> = {
   'Career Coach': 'مربی شغلی',
 };
 
+const STACK_LABELS_FA: Record<string, string> = {
+  Frontend: 'فرانت‌اند',
+  Backend: 'بک‌اند',
+  'Full Stack': 'فول‌استک',
+  Mobile: 'موبایل',
+  'Data / AI / ML': 'داده / هوش مصنوعی / یادگیری ماشین',
+  'DevOps / Cloud': 'دواپس / کلود',
+  'QA / Testing': 'تست و کنترل کیفیت',
+  Security: 'امنیت',
+  'Game Development': 'توسعه بازی',
+  'Embedded / Systems': 'سیستم‌های نهفته / سیستمی',
+  'UX/UI Design': 'طراحی UX/UI',
+  'Product / Management': 'محصول / مدیریت',
+  Other: 'سایر',
+};
+
 const COUNTRY_LABELS_FA: Record<string, string> = {
   Iran: 'ایران',
   'United States': 'ایالات متحده',
@@ -76,13 +92,14 @@ const COUNTRY_FLAGS: Record<string, string> = {
   Other: '🌍',
 };
 
-type OptionKind = 'skill' | 'title' | 'country';
+type OptionKind = 'skill' | 'title' | 'country' | 'stack';
 
 const LABEL_MAPS: Record<Exclude<Locale, 'en'>, Record<OptionKind, Record<string, string>>> = {
   fa: {
     skill: SKILL_LABELS_FA,
     title: TITLE_LABELS_FA,
     country: COUNTRY_LABELS_FA,
+    stack: STACK_LABELS_FA,
   },
 };
 

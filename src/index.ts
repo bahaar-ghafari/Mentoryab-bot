@@ -7,7 +7,7 @@ import { resolve } from 'node:path';
 import { findMentorMatches, canonicalizeSkill } from './matching.js';
 import { getTexts, LOCALE_TEXTS, LANGUAGE_CHOICES, isLocale, type Locale, type Texts } from './i18n/index.js';
 import { translateOption, getContactLabels } from './i18n/labels.js';
-import { SKILL_OPTIONS } from './i18n/options.js';
+import { SKILL_OPTIONS, STACK_OPTIONS, TECH_SUGGESTIONS } from './i18n/options.js';
 import { matchesMenuButton } from './i18n/menuButtons.js';
 import { chunkMentions } from './mentions.js';
 import {
@@ -22,7 +22,7 @@ import {
 } from './contact.js';
 
 const ONBOARDING_STEPS = {
-  mentor: ['language', 'spokenLanguage', 'name', 'title', 'skills', 'frameworks', 'experience', 'country', 'contact'],
+  mentor: ['language', 'spokenLanguage', 'name', 'title', 'skills', 'stack', 'frameworks', 'experience', 'country', 'contact'],
   mentee: ['language', 'spokenLanguage', 'name', 'goals', 'skills', 'experience', 'country'],
 } as const;
 
@@ -36,6 +36,9 @@ interface UserState {
   awaitingSubStep?: SubStep;
   currentMessageId?: number;
   selectedSkills: string[];
+  // Main stack picked on the 'stack' step (drives framework suggestions) and
+  // the frameworks/languages/tools selected so far.
+  selectedFrameworks?: string[];
   contactMethods?: Partial<Record<ContactType, string>>;
   awaitingContactType?: ContactType;
   language: Locale;
@@ -301,6 +304,43 @@ function buildSkillsInlineKeyboard(options: string[], selected: string[], canGoB
   return { inline_keyboard: rows };
 }
 
+function buildStackInlineKeyboard(canGoBack: boolean, t: Texts) {
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let i = 0; i < STACK_OPTIONS.length; i += 2) {
+    rows.push(
+      STACK_OPTIONS.slice(i, i + 2).map((opt) => ({ text: translateOption(t.locale, opt, 'stack'), callback_data: `stack:${opt}` }))
+    );
+  }
+  if (canGoBack) rows.push([{ text: t.ui.back, callback_data: 'back' }]);
+  return { inline_keyboard: rows };
+}
+
+// Multi-select of languages/frameworks/tools suggested for the chosen stack.
+// Anything the mentor typed that isn't a suggestion is appended as a selected
+// button so it can be un-toggled.
+function buildFrameworksInlineKeyboard(stack: string | undefined, selected: string[], canGoBack: boolean, t: Texts) {
+  const options = TECH_SUGGESTIONS[stack ?? ''] ?? TECH_SUGGESTIONS.Other;
+  const custom = selected.filter((s) => !options.some((o) => o.toLowerCase() === s.toLowerCase()));
+  const all = [...options, ...custom];
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let i = 0; i < all.length; i += 3) {
+    rows.push(
+      all.slice(i, i + 3).map((opt) => {
+        const isSel = selected.some((s) => s.toLowerCase() === opt.toLowerCase());
+        return { text: isSel ? `✅ ${opt}` : opt, callback_data: `toggle_fw:${opt}`.slice(0, 64) };
+      })
+    );
+  }
+  const actionRow: Array<{ text: string; callback_data: string }> = [];
+  if (canGoBack) actionRow.push({ text: t.ui.back, callback_data: 'back' });
+  actionRow.push({
+    text: selected.length > 0 ? `${t.ui.done} ✅ (${selected.length})` : t.ui.done,
+    callback_data: 'fw_done',
+  });
+  rows.push(actionRow);
+  return { inline_keyboard: rows };
+}
+
 function buildTitleInlineKeyboard(canGoBack: boolean, t: Texts) {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
   const options = t.titleOptions;
@@ -441,9 +481,14 @@ async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee',
       break;
     }
 
+    case 'stack':
+      text = t.prompts.stack;
+      reply_markup = buildStackInlineKeyboard(canGoBack, t);
+      break;
+
     case 'frameworks':
       text = t.prompts.frameworks;
-      reply_markup = canGoBack ? { inline_keyboard: [[backBtn]] } : { inline_keyboard: [] as unknown[] };
+      reply_markup = buildFrameworksInlineKeyboard(state.profile.stack, state.selectedFrameworks ?? [], canGoBack, t);
       break;
 
     case 'experience':
@@ -2107,6 +2152,7 @@ bot.on('callback_query', async (callbackQuery) => {
         country: profileForRole.country || '',
       },
       selectedSkills: [...skills],
+      selectedFrameworks: mentor ? [...mentor.frameworks] : [],
       language: isLocale(user.language) ? user.language : 'en',
       editingField: field,
     };
@@ -2126,7 +2172,8 @@ bot.on('callback_query', async (callbackQuery) => {
       });
       return;
     }
-    await showStep(chatId, field, role, telegramId);
+    // Frameworks are suggested per main stack, so ask for the stack first.
+    await showStep(chatId, field === 'frameworks' ? 'stack' : field, role, telegramId);
     return;
   }
 
@@ -2221,6 +2268,7 @@ bot.on('callback_query', async (callbackQuery) => {
           country: profile.country || '',
         },
         selectedSkills: [...profile.skills],
+        selectedFrameworks: [...profile.frameworks],
         contactMethods: existingContacts,
         language: adminLocale,
         editingField: field,
@@ -2254,7 +2302,8 @@ bot.on('callback_query', async (callbackQuery) => {
       });
       return;
     }
-    await showStep(chatId, field, role, telegramId);
+    // Frameworks are suggested per main stack, so ask for the stack first.
+    await showStep(chatId, field === 'frameworks' ? 'stack' : field, role, telegramId);
     return;
   }
 
@@ -2454,6 +2503,42 @@ bot.on('callback_query', async (callbackQuery) => {
   if (data.startsWith('title:') && !data.startsWith('title_')) {
     if (!state || !chatId) return;
     state.profile.title = data.slice('title:'.length);
+    await advanceOrFinish(chatId, telegramId, state);
+    return;
+  }
+
+  // ── Main stack selected ──
+  if (data.startsWith('stack:')) {
+    if (!state || !chatId) return;
+    state.profile.stack = data.slice('stack:'.length);
+    if (state.editingField === 'frameworks') {
+      // Editing just the frameworks: the stack only picks suggestions, so go
+      // on to them instead of saving.
+      await showStep(chatId, 'frameworks', state.role, telegramId);
+      return;
+    }
+    await advanceOrFinish(chatId, telegramId, state);
+    return;
+  }
+
+  // ── Framework / language / tool toggle ──
+  if (data.startsWith('toggle_fw:')) {
+    if (!state || !chatId) return;
+    const fw = data.slice('toggle_fw:'.length);
+    const selected = (state.selectedFrameworks ??= []);
+    const idx = selected.findIndex((s) => s.toLowerCase() === fw.toLowerCase());
+    if (idx === -1) selected.push(fw);
+    else selected.splice(idx, 1);
+    await bot.editMessageReplyMarkup(
+      buildFrameworksInlineKeyboard(state.profile.stack, selected, state.stepIndex > 0, t),
+      { chat_id: chatId, message_id: state.currentMessageId }
+    );
+    return;
+  }
+
+  if (data === 'fw_done') {
+    if (!state || !chatId) return;
+    state.profile.frameworks = (state.selectedFrameworks ?? []).join(', ');
     await advanceOrFinish(chatId, telegramId, state);
     return;
   }
@@ -2773,6 +2858,23 @@ bot.on('message', async (msg: Message) => {
       await bot.editMessageReplyMarkup(markup, { chat_id: chatId, message_id: state.currentMessageId });
     } catch (err) {
       console.error('skill keyboard update failed:', err);
+    }
+    return;
+  }
+
+  // Frameworks step: typing adds to the selection; only Done advances
+  if (currentStep === 'frameworks' && (!state.editingField || state.profile.stack)) {
+    const selected = (state.selectedFrameworks ??= []);
+    for (const f of text.split(',').map((x) => x.trim()).filter(Boolean)) {
+      if (!selected.some((e) => e.toLowerCase() === f.toLowerCase())) selected.push(f);
+    }
+    try {
+      await bot.editMessageReplyMarkup(
+        buildFrameworksInlineKeyboard(state.profile.stack, selected, state.stepIndex > 0, t),
+        { chat_id: chatId, message_id: state.currentMessageId }
+      );
+    } catch (err) {
+      console.error('frameworks keyboard update failed:', err);
     }
     return;
   }
