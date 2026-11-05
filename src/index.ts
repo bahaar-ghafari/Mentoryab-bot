@@ -1354,7 +1354,7 @@ const startMentorOnboarding = async (msg: Message) => {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
   const existing = await prisma.user.findUnique({ where: { telegramId } });
-  const state: UserState = { role: 'mentor', stepIndex: 0, profile: {}, selectedSkills: [], language: isLocale(existing?.language) ? existing.language : 'en' };
+  const state: UserState = { role: 'mentor', stepIndex: 0, profile: {}, selectedSkills: [], language: isLocale(existing?.language) ? existing.language : 'fa' };
   userStates.set(telegramId, state);
   await showStep(chatId, 'name', 'mentor', telegramId);
 };
@@ -1363,7 +1363,7 @@ const startMenteeOnboarding = async (msg: Message) => {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
   const existing = await prisma.user.findUnique({ where: { telegramId } });
-  const state: UserState = { role: 'mentee', stepIndex: 0, profile: {}, selectedSkills: [], language: isLocale(existing?.language) ? existing.language : 'en' };
+  const state: UserState = { role: 'mentee', stepIndex: 0, profile: {}, selectedSkills: [], language: isLocale(existing?.language) ? existing.language : 'fa' };
   userStates.set(telegramId, state);
   await showStep(chatId, 'name', 'mentee', telegramId);
 };
@@ -2083,7 +2083,7 @@ bot.on('callback_query', async (callbackQuery) => {
       },
       selectedSkills: [...skills],
       selectedFrameworks: mentor ? [...mentor.frameworks] : [],
-      language: isLocale(user.language) ? user.language : 'en',
+      language: isLocale(user.language) ? user.language : 'fa',
       editingField: field,
     };
     if (mentor) {
@@ -2170,7 +2170,7 @@ bot.on('callback_query', async (callbackQuery) => {
     const [role, profileIdStr, field] = rest.split(':') as ['mentor' | 'mentee', string, string];
     const profileId = Number(profileIdStr);
     const admin = await prisma.user.findUnique({ where: { telegramId } });
-    const adminLocale: Locale = admin && isLocale(admin.language) ? admin.language : 'en';
+    const adminLocale: Locale = admin && isLocale(admin.language) ? admin.language : 'fa';
 
     let editState: UserState;
     if (role === 'mentor') {

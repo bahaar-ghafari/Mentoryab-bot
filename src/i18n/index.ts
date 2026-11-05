@@ -7,7 +7,7 @@ export type Texts = Omit<typeof en, 'locale'> & { locale: Locale };
 export const LOCALE_TEXTS: Record<Locale, Texts> = { en, fa };
 
 export function getTexts(locale?: string | null): Texts {
-  return locale === 'fa' ? fa : en;
+  return locale === 'en' ? en : fa;
 }
 
 export function isLocale(value: string | null | undefined): value is Locale {
