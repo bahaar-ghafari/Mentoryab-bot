@@ -22,8 +22,8 @@ import {
 } from './contact.js';
 
 const ONBOARDING_STEPS = {
-  mentor: ['language', 'spokenLanguage', 'name', 'title', 'skills', 'stack', 'frameworks', 'experience', 'country', 'contact'],
-  mentee: ['language', 'spokenLanguage', 'name', 'goals', 'skills', 'experience', 'country'],
+  mentor: ['spokenLanguage', 'name', 'title', 'skills', 'stack', 'frameworks', 'experience', 'country', 'contact'],
+  mentee: ['spokenLanguage', 'name', 'goals', 'skills', 'experience', 'country'],
 } as const;
 
 type OnboardingStep = typeof ONBOARDING_STEPS['mentor'][number] | typeof ONBOARDING_STEPS['mentee'][number];
@@ -1384,17 +1384,19 @@ bot.onText(/\/start/, async (msg: Message) => {
 const startMentorOnboarding = async (msg: Message) => {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
-  const state: UserState = { role: 'mentor', stepIndex: 0, profile: {}, selectedSkills: [], language: 'en' };
+  const existing = await prisma.user.findUnique({ where: { telegramId } });
+  const state: UserState = { role: 'mentor', stepIndex: 0, profile: {}, selectedSkills: [], language: isLocale(existing?.language) ? existing.language : 'en' };
   userStates.set(telegramId, state);
-  await showStep(chatId, 'language', 'mentor', telegramId);
+  await showStep(chatId, 'spokenLanguage', 'mentor', telegramId);
 };
 
 const startMenteeOnboarding = async (msg: Message) => {
   const chatId = msg.chat.id;
   const telegramId = String(msg.from?.id);
-  const state: UserState = { role: 'mentee', stepIndex: 0, profile: {}, selectedSkills: [], language: 'en' };
+  const existing = await prisma.user.findUnique({ where: { telegramId } });
+  const state: UserState = { role: 'mentee', stepIndex: 0, profile: {}, selectedSkills: [], language: isLocale(existing?.language) ? existing.language : 'en' };
   userStates.set(telegramId, state);
-  await showStep(chatId, 'language', 'mentee', telegramId);
+  await showStep(chatId, 'spokenLanguage', 'mentee', telegramId);
 };
 
 const startOrSearchMentee = async (msg: Message) => {
@@ -1946,13 +1948,6 @@ bot.on('callback_query', async (callbackQuery) => {
       update: { language: code },
       create: { telegramId, language: code },
     });
-
-    const isOnboardingLanguageStep = !!state && ONBOARDING_STEPS[state.role][state.stepIndex] === 'language';
-    if (state && isOnboardingLanguageStep) {
-      state.language = code;
-      await advanceOrFinish(chatId, telegramId, state);
-      return;
-    }
 
     const nt = getTexts(code);
     const messageId = callbackQuery.message?.message_id;
