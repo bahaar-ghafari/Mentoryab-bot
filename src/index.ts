@@ -396,7 +396,8 @@ function buildMainMenuKeyboard(hasProfile: boolean, isAdmin: boolean, t: Texts) 
     keyboard.push([{ text: t.startMenu.adminMentors }, { text: t.startMenu.adminMentees }]);
     keyboard.push([{ text: t.startMenu.adminNonMentors }]);
   }
-  keyboard.push([{ text: t.startMenu.settings }, { text: t.startMenu.help }]);
+  keyboard.push([{ text: t.startMenu.settingsLanguage }, { text: t.startMenu.help }]);
+  if (isAdmin) keyboard.push([{ text: t.startMenu.settings }]);
   return { keyboard, resize_keyboard: true };
 }
 
@@ -1846,12 +1847,18 @@ const handleAdminMenteesList = async (msg: Message) => {
   await renderAdminMenteesList(msg.chat.id, telegramId);
 };
 
+const handleBotLanguage = async (msg: Message) => {
+  await bot.sendMessage(msg.chat.id, `🌐 ${LOCALE_TEXTS.en.prompts.language}\n${LOCALE_TEXTS.fa.prompts.language}`, {
+    reply_markup: buildLanguageInlineKeyboard(),
+  });
+};
+
 const handleSettings = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
   const user = await prisma.user.findUnique({ where: { telegramId } });
   const t = getTexts(user?.language);
-  const rows = [[{ text: t.startMenu.settingsLanguage, callback_data: 'settings_language' }]];
-  if (adminIds.has(telegramId)) rows.push([{ text: t.startMenu.adminRestart, callback_data: 'settings_restart' }]);
+  if (!adminIds.has(telegramId)) return;
+  const rows = [[{ text: t.startMenu.adminRestart, callback_data: 'settings_restart' }]];
   await bot.sendMessage(msg.chat.id, t.admin.settingsTitle, { reply_markup: { inline_keyboard: rows } });
 };
 
@@ -2780,6 +2787,7 @@ const MENU_ACTIONS: Array<[keyof Texts['startMenu'], (msg: Message) => Promise<v
   ['joinMentors', startMentorOnboarding],
   ['needMentor', startOrSearchMentee],
   ['editProfile', handleEditProfile],
+  ['settingsLanguage', handleBotLanguage],
   ['settings', handleSettings],
   ['help', handleHelp],
   ['adminMentors', handleAdminMentorsList],
