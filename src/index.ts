@@ -395,9 +395,8 @@ function buildMainMenuKeyboard(hasProfile: boolean, isAdmin: boolean, t: Texts) 
   if (isAdmin) {
     keyboard.push([{ text: t.startMenu.adminMentors }, { text: t.startMenu.adminMentees }]);
     keyboard.push([{ text: t.startMenu.adminNonMentors }]);
-    keyboard.push([{ text: t.startMenu.adminRestart }]);
   }
-  keyboard.push([{ text: t.startMenu.help }]);
+  keyboard.push([{ text: t.startMenu.settings }, { text: t.startMenu.help }]);
   return { keyboard, resize_keyboard: true };
 }
 
@@ -1847,6 +1846,15 @@ const handleAdminMenteesList = async (msg: Message) => {
   await renderAdminMenteesList(msg.chat.id, telegramId);
 };
 
+const handleSettings = async (msg: Message) => {
+  const telegramId = String(msg.from?.id);
+  const user = await prisma.user.findUnique({ where: { telegramId } });
+  const t = getTexts(user?.language);
+  const rows = [[{ text: t.startMenu.settingsLanguage, callback_data: 'settings_language' }]];
+  if (adminIds.has(telegramId)) rows.push([{ text: t.startMenu.adminRestart, callback_data: 'settings_restart' }]);
+  await bot.sendMessage(msg.chat.id, t.admin.settingsTitle, { reply_markup: { inline_keyboard: rows } });
+};
+
 const handleAdminRestart = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
   if (!adminIds.has(telegramId)) return;
@@ -1884,6 +1892,20 @@ bot.on('callback_query', async (callbackQuery) => {
   const t = getTexts(state?.language);
 
   await bot.answerCallbackQuery(callbackQuery.id).catch(() => {});
+
+  if (data === 'settings_language') {
+    if (!chatId) return;
+    await bot.sendMessage(chatId, `🌐 ${LOCALE_TEXTS.en.prompts.language}\n${LOCALE_TEXTS.fa.prompts.language}`, {
+      reply_markup: buildLanguageInlineKeyboard(),
+    });
+    return;
+  }
+
+  if (data === 'settings_restart') {
+    if (!chatId || !adminIds.has(telegramId)) return;
+    await handleAdminRestart({ chat: { id: chatId }, from: callbackQuery.from } as Message);
+    return;
+  }
 
   // ── Language selected (onboarding step 1, or standalone /language command) ──
   if (data.startsWith('language:')) {
@@ -2758,11 +2780,11 @@ const MENU_ACTIONS: Array<[keyof Texts['startMenu'], (msg: Message) => Promise<v
   ['joinMentors', startMentorOnboarding],
   ['needMentor', startOrSearchMentee],
   ['editProfile', handleEditProfile],
+  ['settings', handleSettings],
   ['help', handleHelp],
   ['adminMentors', handleAdminMentorsList],
   ['adminMentees', handleAdminMenteesList],
   ['adminNonMentors', handleAdminNonMentors],
-  ['adminRestart', handleAdminRestart],
 ];
 
 function findMenuAction(text: string): ((msg: Message) => Promise<void>) | null {
