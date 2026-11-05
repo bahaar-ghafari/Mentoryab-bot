@@ -22,8 +22,8 @@ import {
 } from './contact.js';
 
 const ONBOARDING_STEPS = {
-  mentor: ['spokenLanguage', 'name', 'title', 'skills', 'stack', 'frameworks', 'experience', 'country', 'contact'],
-  mentee: ['spokenLanguage', 'name', 'goals', 'skills', 'experience', 'country'],
+  mentor: ['name', 'title', 'skills', 'stack', 'frameworks', 'experience', 'country', 'contact'],
+  mentee: ['name', 'goals', 'skills', 'experience', 'country'],
 } as const;
 
 type OnboardingStep = typeof ONBOARDING_STEPS['mentor'][number] | typeof ONBOARDING_STEPS['mentee'][number];
@@ -396,7 +396,7 @@ function buildMainMenuKeyboard(hasProfile: boolean, isAdmin: boolean, t: Texts) 
     keyboard.push([{ text: t.startMenu.adminMentors }, { text: t.startMenu.adminMentees }]);
     keyboard.push([{ text: t.startMenu.adminNonMentors }]);
   }
-  keyboard.push([{ text: t.startMenu.settingsLanguage }, { text: t.startMenu.help }]);
+  keyboard.push([{ text: t.startMenu.help }]);
   if (isAdmin) keyboard.push([{ text: t.startMenu.settings }]);
   return { keyboard, resize_keyboard: true };
 }
@@ -447,23 +447,6 @@ async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee',
   let reply_markup: object;
 
   switch (step) {
-    case 'language':
-      // Shown before we know the user's preference, so greet in both languages.
-      // This is the bot's display language — the language they speak with
-      // mentees/mentors is asked separately, right after this.
-      text = `🌐 ${LOCALE_TEXTS.en.prompts.language}\n${LOCALE_TEXTS.fa.prompts.language}`;
-      reply_markup = buildLanguageInlineKeyboard();
-      break;
-
-    case 'spokenLanguage': {
-      text = t.prompts.editSpokenLanguage;
-      const langKeyboard = buildLanguageInlineKeyboard();
-      reply_markup = canGoBack
-        ? { inline_keyboard: [...langKeyboard.inline_keyboard, [backBtn]] }
-        : langKeyboard;
-      break;
-    }
-
     case 'name':
       text = state.editingField ? t.prompts.editName : (role === 'mentor' ? t.mentorStart : t.menteeStart);
       reply_markup = canGoBack ? { inline_keyboard: [[backBtn]] } : { inline_keyboard: [] as unknown[] };
@@ -669,7 +652,6 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
     displayFrameworks ? `${t.summary.frameworks}: ${displayFrameworks}` : null,
     state.profile.experience ? `${t.summary.careerStart}: ${state.profile.experience}` : null,
     displayCountry ? `${t.summary.location}: ${displayCountry}` : null,
-    `${t.summary.language}: ${languageDisplayName(state.profile.language || state.language)}`,
     contactSummary ? `${t.summary.contact}: ${contactSummary}` : null,
     state.profile.goals ? `${t.summary.goals}: ${state.profile.goals}` : null,
   ].filter(Boolean).join('\n');
@@ -783,8 +765,8 @@ async function notifyMenteesOfNewMatch(mentorProfileId: number) {
 
 // ── Profile view (Edit Profile) ───────────────────────────────────────────────
 
-const MENTOR_PROFILE_FIELDS = ['name', 'title', 'skills', 'frameworks', 'experience', 'country', 'contact', 'language'] as const;
-const MENTEE_PROFILE_FIELDS = ['name', 'goals', 'skills', 'experience', 'country', 'language'] as const;
+const MENTOR_PROFILE_FIELDS = ['name', 'title', 'skills', 'frameworks', 'experience', 'country', 'contact'] as const;
+const MENTEE_PROFILE_FIELDS = ['name', 'goals', 'skills', 'experience', 'country'] as const;
 
 function buildFieldEditKeyboard(
   role: 'mentor' | 'mentee',
@@ -910,7 +892,6 @@ async function renderProfileView(chatId: number, telegramId: string, role: 'ment
     `${t.summary.skills}: ${displaySkills}`,
     `${t.summary.experience}: ${format(t.summary.yearsLabel, { n: profile.experienceYears ?? 0 })}`,
     displayCountry ? `${t.summary.country}: ${displayCountry}` : null,
-    `${t.summary.language}: ${languageDisplayName(profile.language)}`,
     mentor && mentor.contactMethods.length ? `${t.summary.contact}: ${mentor.contactMethods.join(', ')}` : null,
     mentee?.goals ? `${t.summary.goals}: ${mentee.goals}` : null,
   ].filter(Boolean).join('\n');
@@ -985,7 +966,6 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
       displayFrameworks ? `${t.summary.frameworks}: ${displayFrameworks}` : null,
     `${t.summary.experience}: ${format(t.summary.yearsLabel, { n: experienceYears ?? 0 })}`,
     displayCountry ? `${t.summary.country}: ${displayCountry}` : null,
-    `${t.summary.language}: ${languageDisplayName(language)}`,
     contactSummary ? `${t.summary.contact}: ${contactSummary}` : null,
     goals ? `${t.summary.goals}: ${goals}` : null,
   ].filter(Boolean).join('\n');
@@ -1050,10 +1030,6 @@ async function saveEditedFieldAndReturnToProfile(chatId: number, telegramId: str
       updateData.frameworks = (state.profile.frameworks || '').split(',').map((s) => s.trim()).filter(Boolean);
     } else if (field === 'goals' && state.role === 'mentee') {
       updateData.goals = state.profile.goals || null;
-    } else if (field === 'language') {
-      // The profile's spoken language, used for matching/filters — distinct
-      // from the UI text locale (state.language), which is untouched here.
-      updateData.language = state.profile.language;
     } else if (field === 'skills') {
       const skillsArr = (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean);
       updateData = state.role === 'mentor' ? { skills: skillsArr } : { skillsNeeded: skillsArr };
@@ -1160,13 +1136,6 @@ bot.onText(/\/mentors/, async (msg: Message) => {
 
 bot.onText(/^\/restart$/, async (msg: Message) => {
   await handleAdminRestart(msg);
-});
-
-bot.onText(/^\/language$/, async (msg: Message) => {
-  const chatId = msg.chat.id;
-  await bot.sendMessage(chatId, `🌐 ${LOCALE_TEXTS.en.prompts.language}\n${LOCALE_TEXTS.fa.prompts.language}`, {
-    reply_markup: buildLanguageInlineKeyboard(),
-  });
 });
 
 bot.onText(/^\/history$/, async (msg: Message) => {
@@ -1387,7 +1356,7 @@ const startMentorOnboarding = async (msg: Message) => {
   const existing = await prisma.user.findUnique({ where: { telegramId } });
   const state: UserState = { role: 'mentor', stepIndex: 0, profile: {}, selectedSkills: [], language: isLocale(existing?.language) ? existing.language : 'en' };
   userStates.set(telegramId, state);
-  await showStep(chatId, 'spokenLanguage', 'mentor', telegramId);
+  await showStep(chatId, 'name', 'mentor', telegramId);
 };
 
 const startMenteeOnboarding = async (msg: Message) => {
@@ -1396,7 +1365,7 @@ const startMenteeOnboarding = async (msg: Message) => {
   const existing = await prisma.user.findUnique({ where: { telegramId } });
   const state: UserState = { role: 'mentee', stepIndex: 0, profile: {}, selectedSkills: [], language: isLocale(existing?.language) ? existing.language : 'en' };
   userStates.set(telegramId, state);
-  await showStep(chatId, 'spokenLanguage', 'mentee', telegramId);
+  await showStep(chatId, 'name', 'mentee', telegramId);
 };
 
 const startOrSearchMentee = async (msg: Message) => {
@@ -1518,7 +1487,6 @@ async function renderMentorBrowseList(chatId: number, telegramId: string) {
       text += `\n${t.summary.skills}: ${displaySkills}`;
       text += `\n${t.summary.experience}: ${format(t.summary.yearsLabel, { n: m.experienceYears })}`;
       text += `\n${t.summary.location}: ${m.location || t.messages.notAvailable}`;
-      text += `\n${t.summary.language}: ${languageDisplayName(m.language)}\n`;
     });
     text += `\n${format(t.browse.pageIndicator, { current: browseState.page + 1, total: totalPages })}`;
   }
@@ -1554,7 +1522,6 @@ async function renderFilterMenu(chatId: number, telegramId: string) {
   const text = `${t.browse.filterMenuHeader}\n\n${filtersSummary}`;
 
   const keyboard: Array<Array<{ text: string; callback_data: string }>> = [
-    [{ text: `${browseState.language ? '✅ ' : ''}${t.browse.filterLanguageOption}`, callback_data: 'browse_filter_dim:language' }],
     [{ text: `${browseState.title ? '✅ ' : ''}${t.browse.filterTitleOption}`, callback_data: 'browse_filter_dim:title' }],
     [{ text: `${browseState.country ? '✅ ' : ''}${t.browse.filterCountryOption}`, callback_data: 'browse_filter_dim:country' }],
   ];
@@ -1769,7 +1736,6 @@ async function renderAdminMentorsList(chatId: number, telegramId: string) {
     `   ${t.summary.skills}: ${m.skills.map((s) => translateOption(t.locale, s, 'skill')).join(', ')}`,
     `   ${t.summary.experience}: ${format(t.summary.yearsLabel, { n: m.experienceYears })}`,
     m.location ? `   ${t.summary.location}: ${m.location}` : null,
-    `   ${t.summary.language}: ${languageDisplayName(m.language)}`,
     m.contactMethods.length ? `   ${t.summary.contact}: ${m.contactMethods.join(', ')}` : null,
   ].filter(Boolean).join('\n'));
   await bot.sendMessage(chatId, `${format(t.admin.mentorsListHeader, { count: mentors.length })}\n\n${lines.join('\n\n')}`);
@@ -1823,7 +1789,6 @@ async function renderAdminMenteesList(chatId: number, telegramId: string) {
     `   ${t.summary.skills}: ${m.skillsNeeded.map((s) => translateOption(t.locale, s, 'skill')).join(', ')}`,
     m.experienceYears != null ? `   ${t.summary.experience}: ${format(t.summary.yearsLabel, { n: m.experienceYears })}` : null,
     m.location ? `   ${t.summary.location}: ${m.location}` : null,
-    `   ${t.summary.language}: ${languageDisplayName(m.language)}`,
     m.goals ? `   ${t.summary.goals}: ${m.goals}` : null,
   ].filter(Boolean).join('\n'));
   await bot.sendMessage(chatId, `${format(t.admin.menteesListHeader, { count: mentees.length })}\n\n${lines.join('\n\n')}`);
@@ -1847,12 +1812,6 @@ const handleAdminMenteesList = async (msg: Message) => {
   const telegramId = String(msg.from?.id);
   if (!adminIds.has(telegramId)) return;
   await renderAdminMenteesList(msg.chat.id, telegramId);
-};
-
-const handleBotLanguage = async (msg: Message) => {
-  await bot.sendMessage(msg.chat.id, `🌐 ${LOCALE_TEXTS.en.prompts.language}\n${LOCALE_TEXTS.fa.prompts.language}`, {
-    reply_markup: buildLanguageInlineKeyboard(),
-  });
 };
 
 const handleSettings = async (msg: Message) => {
@@ -1902,62 +1861,9 @@ bot.on('callback_query', async (callbackQuery) => {
 
   await bot.answerCallbackQuery(callbackQuery.id).catch(() => {});
 
-  if (data === 'settings_language') {
-    if (!chatId) return;
-    await bot.sendMessage(chatId, `🌐 ${LOCALE_TEXTS.en.prompts.language}\n${LOCALE_TEXTS.fa.prompts.language}`, {
-      reply_markup: buildLanguageInlineKeyboard(),
-    });
-    return;
-  }
-
   if (data === 'settings_restart') {
     if (!chatId || !adminIds.has(telegramId)) return;
     await handleAdminRestart({ chat: { id: chatId }, from: callbackQuery.from } as Message);
-    return;
-  }
-
-  // ── Language selected (onboarding step 1, or standalone /language command) ──
-  if (data.startsWith('language:')) {
-    if (!chatId) return;
-    const code = data.slice('language:'.length);
-    if (!isLocale(code)) return;
-
-    // Editing the profile's spoken language (used for matching/filters) is
-    // separate from the UI text locale — do NOT touch User.language or
-    // state.language here; only /language (or the display-language onboarding
-    // step below) does that.
-    if (state?.editingField === 'language') {
-      state.profile.language = code;
-      await saveEditedFieldAndReturnToProfile(chatId, telegramId, state);
-      return;
-    }
-
-    // Onboarding's dedicated "what language do you speak with mentees/mentors"
-    // step, asked right after the display-language step — also kept separate
-    // from the UI text locale.
-    const isOnboardingSpokenLanguageStep = !!state && ONBOARDING_STEPS[state.role][state.stepIndex] === 'spokenLanguage';
-    if (state && isOnboardingSpokenLanguageStep) {
-      state.profile.language = code;
-      await advanceOrFinish(chatId, telegramId, state);
-      return;
-    }
-
-    // Everything from here on sets the bot's display language.
-    await prisma.user.upsert({
-      where: { telegramId },
-      update: { language: code },
-      create: { telegramId, language: code },
-    });
-
-    const nt = getTexts(code);
-    const messageId = callbackQuery.message?.message_id;
-    if (messageId) {
-      await bot.editMessageText(nt.messages.languageUpdated, {
-        chat_id: chatId,
-        message_id: messageId,
-        reply_markup: { inline_keyboard: [] },
-      }).catch(() => {});
-    }
     return;
   }
 
@@ -2189,13 +2095,6 @@ bot.on('callback_query', async (callbackQuery) => {
     }
     userStates.set(telegramId, editState);
 
-    if (field === 'language') {
-      const editT = getTexts(editState.language);
-      await bot.sendMessage(chatId, editT.prompts.editSpokenLanguage, {
-        reply_markup: buildLanguageInlineKeyboard(),
-      });
-      return;
-    }
     // Frameworks are suggested per main stack, so ask for the stack first.
     await showStep(chatId, field === 'frameworks' ? 'stack' : field, role, telegramId);
     return;
@@ -2319,13 +2218,6 @@ bot.on('callback_query', async (callbackQuery) => {
     }
     userStates.set(telegramId, editState);
 
-    if (field === 'language') {
-      const editT = getTexts(editState.language);
-      await bot.sendMessage(chatId, editT.prompts.editSpokenLanguage, {
-        reply_markup: buildLanguageInlineKeyboard(),
-      });
-      return;
-    }
     // Frameworks are suggested per main stack, so ask for the stack first.
     await showStep(chatId, field === 'frameworks' ? 'stack' : field, role, telegramId);
     return;
@@ -2782,7 +2674,6 @@ const MENU_ACTIONS: Array<[keyof Texts['startMenu'], (msg: Message) => Promise<v
   ['joinMentors', startMentorOnboarding],
   ['needMentor', startOrSearchMentee],
   ['editProfile', handleEditProfile],
-  ['settingsLanguage', handleBotLanguage],
   ['settings', handleSettings],
   ['help', handleHelp],
   ['adminMentors', handleAdminMentorsList],
@@ -2836,12 +2727,6 @@ bot.on('message', async (msg: Message) => {
   // Normal text step — when editing a single existing field, that field IS
   // the current step regardless of stepIndex (which stays 0 for edits).
   const currentStep = (state.editingField ?? ONBOARDING_STEPS[state.role][state.stepIndex]) as OnboardingStep;
-
-  // Spoken language: button-only, no free-text alternative.
-  if (currentStep === 'spokenLanguage') {
-    await bot.sendMessage(chatId, t.messages.useButtons);
-    return;
-  }
 
   // Contact step: awaiting a typed value for a chosen contact type
   if (currentStep === 'contact') {
