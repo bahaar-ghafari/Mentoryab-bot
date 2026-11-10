@@ -11,6 +11,7 @@ import { SKILL_OPTIONS, STACK_OPTIONS, TECH_SUGGESTIONS } from './i18n/options.j
 import { matchesMenuButton } from './i18n/menuButtons.js';
 import { chunkMentions } from './mentions.js';
 import { splitForTelegram } from './messages.js';
+import { ONBOARDING_STEPS, calcExperienceYears, buildMentorData } from './onboarding.js';
 import {
   ContactType,
   CONTACT_LABELS,
@@ -22,10 +23,7 @@ import {
   normalizeTelegramUsername,
 } from './contact.js';
 
-const ONBOARDING_STEPS = {
-  mentor: ['name', 'title', 'skills', 'stack', 'frameworks', 'experience', 'country', 'contact'],
-  mentee: ['name', 'goals', 'skills', 'experience', 'country'],
-} as const;
+
 
 type OnboardingStep = typeof ONBOARDING_STEPS['mentor'][number] | typeof ONBOARDING_STEPS['mentee'][number];
 type SubStep = 'year';
@@ -429,10 +427,6 @@ function buildBusyDatePresetsKeyboard(t: Texts) {
   };
 }
 
-function calcExperienceYears(startYearStr: string): number {
-  const year = Number(startYearStr);
-  return Math.max(0, new Date().getFullYear() - year);
-}
 
 // ── Core step renderer ────────────────────────────────────────────────────────
 
@@ -543,13 +537,6 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
   const experienceYears = state.profile.experience ? calcExperienceYears(state.profile.experience) : 0;
   const isMentorNow = state.role === 'mentor';
 
-  // Canonical English labels for storage — keeps admin dumps and cross-language
-  // matching consistent regardless of the mentor's own UI language.
-  const contactMethods = state.contactMethods
-    ? (Object.entries(state.contactMethods) as Array<[ContactType, string]>)
-        .map(([type, value]) => `${CONTACT_LABELS[type]}: ${value}`)
-    : [];
-
   const role = state.role === 'mentor' ? 'MENTOR' : 'MENTEE';
 
   const existingUser = await prisma.user.findUnique({
@@ -558,22 +545,7 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
   });
   const hadProfileBefore = state.role === 'mentor' ? !!existingUser?.mentorProfile : !!existingUser?.menteeProfile;
 
-  const mentorData = {
-    name: state.profile.name || 'Mentor',
-    title: state.profile.title || null,
-    skills: (state.profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean),
-    frameworks: (state.profile.frameworks || '').split(',').map((s) => s.trim()).filter(Boolean),
-    experienceYears,
-    country: state.profile.country || null,
-    location,
-    contactMethods,
-    telegramContact: state.contactMethods?.telegram || null,
-    phoneContact: state.contactMethods?.phone || null,
-    emailContact: state.contactMethods?.email || null,
-    // The language they speak with mentees/mentors — asked as its own
-    // onboarding step, kept separate from state.language (the UI locale).
-    language: state.profile.language || state.language,
-  };
+  const mentorData = buildMentorData(state.profile, state.contactMethods, state.language);
 
   const menteeData = {
     name: state.profile.name || 'Mentee',
