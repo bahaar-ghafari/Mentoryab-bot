@@ -10,6 +10,7 @@ import { translateOption, getContactLabels } from './i18n/labels.js';
 import { SKILL_OPTIONS, STACK_OPTIONS, TECH_SUGGESTIONS } from './i18n/options.js';
 import { matchesMenuButton } from './i18n/menuButtons.js';
 import { chunkMentions } from './mentions.js';
+import { splitForTelegram } from './messages.js';
 import {
   ContactType,
   CONTACT_LABELS,
@@ -1161,7 +1162,7 @@ bot.onText(/^\/history$/, async (msg: Message) => {
     return `${i + 1}. ${actionLabel(entry.action)} — ${entry.role} ${entry.telegramId}${detail ? ` — ${detail}` : ''}${actorNote}\n   ${entry.createdAt.toISOString()}`;
   });
 
-  await bot.sendMessage(msg.chat.id, `${format(t.admin.historyHeader, { count: entries.length })}\n\n${lines.join('\n\n')}`);
+  for (const chunk of splitForTelegram(format(t.admin.historyHeader, { count: entries.length }), lines)) await bot.sendMessage(msg.chat.id, chunk);
 });
 
 // Catch-up view for feedback comments that still need a decision — the
@@ -1738,7 +1739,7 @@ async function renderAdminMentorsList(chatId: number, telegramId: string) {
     m.location ? `   ${t.summary.location}: ${m.location}` : null,
     m.contactMethods.length ? `   ${t.summary.contact}: ${m.contactMethods.join(', ')}` : null,
   ].filter(Boolean).join('\n'));
-  await bot.sendMessage(chatId, `${format(t.admin.mentorsListHeader, { count: mentors.length })}\n\n${lines.join('\n\n')}`);
+  for (const chunk of splitForTelegram(format(t.admin.mentorsListHeader, { count: mentors.length }), lines)) await bot.sendMessage(chatId, chunk);
 
   const manageRows: Array<Array<{ text: string; callback_data: string }>> = [];
   for (let i = 0; i < mentors.length; i += 2) {
@@ -1791,7 +1792,7 @@ async function renderAdminMenteesList(chatId: number, telegramId: string) {
     m.location ? `   ${t.summary.location}: ${m.location}` : null,
     m.goals ? `   ${t.summary.goals}: ${m.goals}` : null,
   ].filter(Boolean).join('\n'));
-  await bot.sendMessage(chatId, `${format(t.admin.menteesListHeader, { count: mentees.length })}\n\n${lines.join('\n\n')}`);
+  for (const chunk of splitForTelegram(format(t.admin.menteesListHeader, { count: mentees.length }), lines)) await bot.sendMessage(chatId, chunk);
 
   const manageRows: Array<Array<{ text: string; callback_data: string }>> = [];
   for (let i = 0; i < mentees.length; i += 2) {
@@ -2852,5 +2853,10 @@ setInterval(() => { checkFeedbackPrompts().catch((err) => console.error('checkFe
 setTimeout(() => { checkBusyReminders().catch((err) => console.error('checkBusyReminders failed:', err)); }, 30_000);
 setTimeout(() => { checkUnclaimedMentorSearchRequests().catch((err) => console.error('checkUnclaimedMentorSearchRequests failed:', err)); }, 30_000);
 setTimeout(() => { checkFeedbackPrompts().catch((err) => console.error('checkFeedbackPrompts failed:', err)); }, 30_000);
+
+// A failed Telegram/DB call in one handler must not kill the process: a restart
+// wipes every user's in-memory onboarding state.
+process.on('unhandledRejection', (reason) => { console.error('unhandledRejection:', reason instanceof Error ? reason.message : reason); });
+process.on('uncaughtException', (err) => { console.error('uncaughtException:', err.message); });
 
 app.listen(port, () => console.log(`Server listening on port ${port}`));
