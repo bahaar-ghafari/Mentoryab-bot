@@ -1057,6 +1057,12 @@ async function saveEditedFieldAndReturnToProfile(chatId: number, telegramId: str
 if (!token) throw new Error('TELEGRAM_BOT_TOKEN is required');
 
 const bot = new TelegramBot(token, { polling: true });
+
+// Diagnostics: polling errors (e.g. 409 = a second instance is polling the same
+// token) were previously completely silent. Update logs carry no message text.
+bot.on('polling_error', (err) => { console.error('polling_error:', err.message); });
+bot.on('message', (m) => { console.log(`update message from=${m.from?.id} update_id_kind=${m.text?.startsWith('/') ? 'command' : m.text ? 'text' : 'other'}`); });
+bot.on('callback_query', (q) => { console.log(`update callback from=${q.from.id} data=${(q.data ?? '').split(':')[0]}`); });
 const userStates = new Map<string, UserState>();
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
