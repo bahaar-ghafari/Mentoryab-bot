@@ -43,6 +43,8 @@ model MentorProfile {
   title           String?
   skills          String[]
   frameworks      String[] @default([])
+  // Optional free-text intro: hours, kinds of help offered, anything else.
+  about           String?
   experienceYears Int
   country         String?
   location        String?

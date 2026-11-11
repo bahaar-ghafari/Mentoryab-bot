@@ -738,7 +738,7 @@ async function notifyMenteesOfNewMatch(mentorProfileId: number) {
 
 // ── Profile view (Edit Profile) ───────────────────────────────────────────────
 
-const MENTOR_PROFILE_FIELDS = ['name', 'title', 'skills', 'frameworks', 'experience', 'country', 'contact'] as const;
+const MENTOR_PROFILE_FIELDS = ['name', 'title', 'skills', 'frameworks', 'experience', 'country', 'contact', 'about'] as const;
 const MENTEE_PROFILE_FIELDS = ['name', 'goals', 'skills', 'experience', 'country'] as const;
 
 function buildFieldEditKeyboard(
@@ -866,6 +866,7 @@ async function renderProfileView(chatId: number, telegramId: string, role: 'ment
     `${t.summary.experience}: ${format(t.summary.yearsLabel, { n: profile.experienceYears ?? 0 })}`,
     displayCountry ? `${t.summary.country}: ${displayCountry}` : null,
     mentor && mentor.contactMethods.length ? `${t.summary.contact}: ${mentor.contactMethods.join(', ')}` : null,
+    mentor?.about ? `${t.summary.about}: ${mentor.about}` : null,
     mentee?.goals ? `${t.summary.goals}: ${mentee.goals}` : null,
   ].filter(Boolean).join('\n');
 
@@ -907,6 +908,7 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
   let displayTitle: string | null = null;
   let contactSummary: string | null = null;
   let goals: string | null = null;
+  let about: string | null = null;
   let mentorCreatedAt: Date | null = null;
   let mentorApproved = true;
 
@@ -918,6 +920,7 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
     frameworks = profile.frameworks;
     displayTitle = profile.title ? translateOption(t.locale, profile.title, 'title') : null;
     contactSummary = profile.contactMethods.length ? profile.contactMethods.join(', ') : null;
+    about = profile.about;
     mentorCreatedAt = profile.createdAt;
     mentorApproved = profile.approved;
   } else {
@@ -940,6 +943,7 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
     `${t.summary.experience}: ${format(t.summary.yearsLabel, { n: experienceYears ?? 0 })}`,
     displayCountry ? `${t.summary.country}: ${displayCountry}` : null,
     contactSummary ? `${t.summary.contact}: ${contactSummary}` : null,
+    about ? `${t.summary.about}: ${about}` : null,
     goals ? `${t.summary.goals}: ${goals}` : null,
   ].filter(Boolean).join('\n');
 
@@ -1001,6 +1005,8 @@ async function saveEditedFieldAndReturnToProfile(chatId: number, telegramId: str
       updateData.title = state.profile.title || null;
     } else if (field === 'frameworks' && state.role === 'mentor') {
       updateData.frameworks = (state.profile.frameworks || '').split(',').map((s) => s.trim()).filter(Boolean);
+    } else if (field === 'about' && state.role === 'mentor') {
+      updateData.about = state.profile.about?.trim() || null;
     } else if (field === 'goals' && state.role === 'mentee') {
       updateData.goals = state.profile.goals || null;
     } else if (field === 'skills') {
@@ -1466,6 +1472,7 @@ async function renderMentorBrowseList(chatId: number, telegramId: string) {
       text += `\n${t.summary.skills}: ${displaySkills}`;
       text += `\n${t.summary.experience}: ${format(t.summary.yearsLabel, { n: m.experienceYears })}`;
       text += `\n${t.summary.location}: ${m.location || t.messages.notAvailable}`;
+      if (m.about) text += `\n${t.summary.about}: ${m.about.length > 120 ? `${m.about.slice(0, 120)}…` : m.about}`;
     });
     text += `\n${format(t.browse.pageIndicator, { current: browseState.page + 1, total: totalPages })}`;
   }
@@ -2056,6 +2063,7 @@ bot.on('callback_query', async (callbackQuery) => {
         name: profileForRole.name,
         title: mentor?.title || '',
         frameworks: mentor?.frameworks?.join(', ') || '',
+        about: mentor?.about || '',
         goals: mentee?.goals || '',
         skills: skills.join(', '),
         country: profileForRole.country || '',
@@ -2165,6 +2173,7 @@ bot.on('callback_query', async (callbackQuery) => {
         profile: {
           name: profile.name,
           title: profile.title || '',
+          about: profile.about || '',
           goals: '',
           skills: profile.skills.join(', '),
           country: profile.country || '',
@@ -2765,6 +2774,11 @@ bot.on('message', async (msg: Message) => {
     } catch (err) {
       console.error('frameworks keyboard update failed:', err);
     }
+    return;
+  }
+
+  if ((currentStep as string) === 'about' && text.length > 700) {
+    await bot.sendMessage(chatId, t.messages.aboutTooLong);
     return;
   }
 

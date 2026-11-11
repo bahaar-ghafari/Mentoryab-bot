@@ -3,6 +3,7 @@ export type MentorProfileLike = {
   name: string;
   title: string | null;
   skills: string[];
+  about?: string | null;
   experienceYears: number;
   location: string | null;
   availability: boolean;

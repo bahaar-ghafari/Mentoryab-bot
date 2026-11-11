@@ -31,6 +31,7 @@ export const texts = {
   prompts: {
     language: 'Choose your language:',
     editName: '👤 What would you like to change your name to?',
+    about: '📝 Tell mentees about yourself: when you are available, what kinds of help you offer, anything else (max 700 characters).',
     title: '💼 What is your professional title? Choose from the options below or type your own.',
     skillsMentor: '🛠️ What skills do you want to share? Choose from the options below or type your own (comma separated).',
     stack: '🧱 What is your main stack or area? Pick the closest one — next you will get suggestions for languages, frameworks and tools.',
@@ -48,6 +49,7 @@ export const texts = {
   },
   messages: {
     useButtons: 'Please use the buttons to make your selection.',
+    aboutTooLong: 'That is too long — please keep it under 700 characters.',
     invalidEmail: 'That doesn\'t look like a valid email address. Please enter one like name@example.com.',
     invalidTelegramUsername: 'That doesn\'t look like a valid Telegram username. It should be 5-32 characters, letters/numbers/underscores only, e.g. @john_doe.',
     invalidPhone: 'That doesn\'t look like a valid phone number. Please enter one like +1234567890.',
@@ -165,6 +167,7 @@ export const texts = {
     title: '💼 Title',
     skills: '🛠️ Skills',
     frameworks: '🧩 Frameworks',
+    about: '📝 About',
     careerStart: '📅 Career start',
     experience: '📅 Exp',
     location: '📍 Location',
