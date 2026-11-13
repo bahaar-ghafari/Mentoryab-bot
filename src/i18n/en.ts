@@ -74,7 +74,7 @@ export const texts = {
     requestNew: 'You have a new mentorship request from {menteeName} ({menteeHandle}). Tap Accept or Decline to respond.',
     requestAccepted: 'Request accepted. You can now connect with the mentee — their profile is below:',
     requestDeclined: 'Request declined.',
-    acceptedNotification: 'Your mentorship request was accepted. The mentor will contact you soon. Their profile is below — you can also reach out to them directly:',
+    acceptedNotification: 'Hello,\n\nHope you are doing well. {mentorHandle} is your mentor — please message them. A few things to keep in mind:\n\nFirst, if you run into any problem or challenge, please do not hesitate to tell me. I am always here and happy to help.\n\nSecond, your mentor mainly guides you; direct teaching or tutoring is not their responsibility. You can always turn to them for help, but you are expected to follow up and keep the conversation going.\n\nThird, if you stay away from your mentor for more than two weeks without letting them know, they may decide to guide someone else, and we may not be able to help you further.\n\nFinally, Pooyesh expects no financial support from you unless you wish to give it. Our greatest joy is seeing you pursue your goals and succeed.\n\nBest wishes 🌱\n\n👇 Your mentor\'s profile:',
     declinedNotification: 'Your mentorship request was declined.',
     needMentorProfile: 'You need to create a mentor profile first by tapping Become Mentor.',
     busySet: 'You are now marked as busy and will not appear in mentor matches.',

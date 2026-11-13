@@ -2588,7 +2588,7 @@ bot.on('callback_query', async (callbackQuery) => {
       if (menteeProfile?.user) {
         const rt = getTexts(menteeProfile.user.language);
         const menteeChatId = Number(menteeProfile.user.telegramId);
-        await bot.sendMessage(menteeChatId, rt.messages.acceptedNotification);
+        await bot.sendMessage(menteeChatId, formatHtml(rt.messages.acceptedNotification, { mentorHandle: userHandle(mentorUser, mentorUser.mentorProfile.name) }), HTML_OPTS);
         await bot.sendMessage(menteeChatId, buildProfileCardHtml(mentorUser, mentorUser.mentorProfile, 'mentor', rt), HTML_OPTS);
       }
     } else {
