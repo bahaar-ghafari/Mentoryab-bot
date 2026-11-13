@@ -1,3 +1,4 @@
+import { escapeHtml, format, formatHtml, userHandle, HTML_OPTS } from './handle.js';
 import dotenv from 'dotenv';
 import express from 'express';
 import TelegramBot, { type Message } from 'node-telegram-bot-api';
@@ -77,15 +78,6 @@ type GroupMember = {
   username?: string;
 };
 
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
-// How people can reach a user on Telegram: @username when they have one,
-// otherwise the numeric ID (usable with tg://user?id=… and admin tools).
-function userHandle(user: { username?: string | null; telegramId: string }): string {
-  return user.username ? `@${user.username}` : `ID ${user.telegramId}`;
-}
 
 function mentorContactMethods(profile: { telegramContact: string | null; phoneContact: string | null; emailContact: string | null }) {
   const methods: Partial<Record<ContactType, string>> = {};
@@ -140,9 +132,6 @@ async function sendMentionBroadcast(chatId: number, members: GroupMember[], text
   return chunks.length;
 }
 
-function format(text: string, values: Record<string, string | number> = {}) {
-  return text.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ''));
-}
 
 function renderCollectedContacts(collected: Partial<Record<ContactType, string>>, labels: Record<ContactType, string>): string {
   return (Object.keys(collected) as ContactType[])
@@ -676,7 +665,7 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
       reply_markup: buildMainMenuKeyboard(true, adminIds.has(telegramId), t),
     });
     if (savedUser.mentorProfile) {
-      await notifyAdminsOfNewMentorSignup(savedUser.mentorProfile.id, state.profile.name || 'Mentor', userHandle(savedUser));
+      await notifyAdminsOfNewMentorSignup(savedUser.mentorProfile.id, state.profile.name || 'Mentor', userHandle(savedUser, state.profile.name));
     }
   } else {
     await bot.sendMessage(chatId, t.chooseRole, {
@@ -688,7 +677,7 @@ async function finishOnboarding(chatId: number, telegramId: string, state: UserS
   // away rather than tapping Find Mentor again immediately afterward.
   if (!isMentorNow) {
     if (!hadProfileBefore) {
-      await notifyAdminsOfNewMenteeSignup(state.profile.name || 'Mentee', userHandle(savedUser));
+      await notifyAdminsOfNewMenteeSignup(state.profile.name || 'Mentee', userHandle(savedUser, state.profile.name));
     }
     await searchMentorsForMentee(chatId, telegramId);
   }
@@ -701,7 +690,8 @@ async function notifyAdminsOfNewMentorSignup(mentorProfileId: number, mentorName
   for (const adminId of adminIds) {
     const adminUser = await prisma.user.findUnique({ where: { telegramId: adminId } });
     const at = getTexts(adminUser?.language);
-    await bot.sendMessage(Number(adminId), format(at.messages.newMentorPendingApproval, { name: mentorName, handle }), {
+    await bot.sendMessage(Number(adminId), formatHtml(at.messages.newMentorPendingApproval, { name: mentorName, handle }), {
+      ...HTML_OPTS,
       reply_markup: { inline_keyboard: [[{ text: at.messages.feedbackApprove, callback_data: `approve_mentor:${mentorProfileId}` }]] },
     }).catch((err) => console.error('Failed to notify admin of new mentor signup:', err));
   }
@@ -712,7 +702,7 @@ async function notifyAdminsOfNewMenteeSignup(menteeName: string, handle: string)
   for (const adminId of adminIds) {
     const adminUser = await prisma.user.findUnique({ where: { telegramId: adminId } });
     const at = getTexts(adminUser?.language);
-    await bot.sendMessage(Number(adminId), format(at.messages.newMenteeSignupLog, { name: menteeName, handle })).catch((err) => console.error('Failed to notify admin of new mentee signup:', err));
+    await bot.sendMessage(Number(adminId), formatHtml(at.messages.newMenteeSignupLog, { name: menteeName, handle }), HTML_OPTS).catch((err) => console.error('Failed to notify admin of new mentee signup:', err));
   }
 }
 
@@ -1183,14 +1173,15 @@ bot.onText(/^\/pendingreviews$/, async (msg: Message) => {
   if (!pending.length) { await bot.sendMessage(msg.chat.id, t.admin.noPendingReviews); return; }
 
   for (const fb of pending) {
-    await bot.sendMessage(msg.chat.id, format(t.messages.feedbackAdminApprovalRequest, {
+    await bot.sendMessage(msg.chat.id, formatHtml(t.messages.feedbackAdminApprovalRequest, {
       mentorName: fb.mentorProfile.name,
-      mentorHandle: userHandle(fb.mentorProfile.user),
+      mentorHandle: userHandle(fb.mentorProfile.user, fb.mentorProfile.name),
       menteeName: fb.menteeProfile.name,
-      menteeHandle: userHandle(fb.menteeProfile.user),
+      menteeHandle: userHandle(fb.menteeProfile.user, fb.menteeProfile.name),
       score: String(fb.score),
       comment: fb.comment!,
     }), {
+      ...HTML_OPTS,
       reply_markup: {
         inline_keyboard: [[
           { text: t.messages.feedbackApprove, callback_data: `feedback_admin_approve:${fb.id}` },
@@ -1601,17 +1592,18 @@ async function postMentorSearchRequestToGroup(
     return;
   }
   const t = getTexts(menteeProfile.language);
-  const body = format(t.messages.mentorSearchGroupPost, {
+  const body = formatHtml(t.messages.mentorSearchGroupPost, {
     menteeName: menteeProfile.name,
-    menteeHandle: userHandle(menteeProfile.user),
+    menteeHandle: userHandle(menteeProfile.user, menteeProfile.name),
     skills: menteeProfile.skillsNeeded.join(', ') || t.messages.notAvailable,
     experience: menteeProfile.experienceYears ?? 0,
     location: menteeProfile.location || t.messages.notAvailable,
     language: languageDisplayName(menteeProfile.language),
     explanation,
   });
-  const post = isReminder ? `${t.messages.reminderBumpPrefix}\n\n${body}` : body;
+  const post = isReminder ? `${escapeHtml(t.messages.reminderBumpPrefix)}\n\n${body}` : body;
   await bot.sendMessage(Number(groupChatId), post, {
+    ...HTML_OPTS,
     reply_markup: { inline_keyboard: [[{ text: t.messages.claimButtonText, callback_data: `claim_search:${requestId}` }]] },
   }).catch((err) => console.error('Failed to post to mentors group:', err));
 }
@@ -1643,14 +1635,14 @@ async function handleMentorExplanationText(msg: Message) {
   for (const adminId of adminIds) {
     const adminUser = await prisma.user.findUnique({ where: { telegramId: adminId } });
     const at = getTexts(adminUser?.language);
-    const notification = format(at.messages.manualMatchNeeded, {
+    const notification = formatHtml(at.messages.manualMatchNeeded, {
       menteeName: user.menteeProfile.name,
-      menteeHandle: userHandle(user),
+      menteeHandle: userHandle(user, user.menteeProfile.name),
       skills: user.menteeProfile.skillsNeeded.join(', ') || at.messages.notAvailable,
       experience: user.menteeProfile.experienceYears ?? 0,
       location: user.menteeProfile.location || at.messages.notAvailable,
     });
-    await bot.sendMessage(Number(adminId), notification).catch(() => {});
+    await bot.sendMessage(Number(adminId), notification, HTML_OPTS).catch(() => {});
   }
 
   await bot.sendMessage(chatId, t.messages.explanationSentConfirmation);
@@ -1703,14 +1695,15 @@ async function finalizeFeedback(chatId: number, telegramId: string, requestId: n
   for (const adminId of adminIds) {
     const adminUser = await prisma.user.findUnique({ where: { telegramId: adminId } });
     const at = getTexts(adminUser?.language);
-    await bot.sendMessage(Number(adminId), format(at.messages.feedbackAdminApprovalRequest, {
+    await bot.sendMessage(Number(adminId), formatHtml(at.messages.feedbackAdminApprovalRequest, {
       mentorName: request.mentorProfile.name,
-      mentorHandle: userHandle(request.mentorProfile.user),
+      mentorHandle: userHandle(request.mentorProfile.user, request.mentorProfile.name),
       menteeName: request.menteeProfile.name,
-      menteeHandle: userHandle(request.menteeProfile.user),
+      menteeHandle: userHandle(request.menteeProfile.user, request.menteeProfile.name),
       score: String(score),
       comment: trimmedComment,
     }), {
+      ...HTML_OPTS,
       reply_markup: {
         inline_keyboard: [[
           { text: at.messages.feedbackApprove, callback_data: `feedback_admin_approve:${feedback.id}` },
@@ -2513,20 +2506,20 @@ bot.on('callback_query', async (callbackQuery) => {
     const rt = getTexts(mentorUser.language);
     await bot.sendMessage(
       Number(mentorUser.telegramId),
-      format(rt.messages.requestNew, { menteeName: mentee.menteeProfile.name, menteeHandle: userHandle(mentee), menteeId: mentee.menteeProfile.id }),
-      { reply_markup: { inline_keyboard: [[{ text: rt.actions.accept, callback_data: `accept:${mentee.menteeProfile.id}` }, { text: rt.actions.decline, callback_data: `decline:${mentee.menteeProfile.id}` }]] } }
+      formatHtml(rt.messages.requestNew, { menteeName: mentee.menteeProfile.name, menteeHandle: userHandle(mentee, mentee.menteeProfile.name), menteeId: mentee.menteeProfile.id }),
+      { ...HTML_OPTS, reply_markup: { inline_keyboard: [[{ text: rt.actions.accept, callback_data: `accept:${mentee.menteeProfile.id}` }, { text: rt.actions.decline, callback_data: `decline:${mentee.menteeProfile.id}` }]] } }
     );
 
     // Purely informational — admins just get a log of the request, no action needed.
     for (const adminId of adminIds) {
       const adminUser = await prisma.user.findUnique({ where: { telegramId: adminId } });
       const at = getTexts(adminUser?.language);
-      await bot.sendMessage(Number(adminId), format(at.messages.newMentorRequestLog, {
+      await bot.sendMessage(Number(adminId), formatHtml(at.messages.newMentorRequestLog, {
         menteeName: mentee.menteeProfile.name,
-        menteeHandle: userHandle(mentee),
+        menteeHandle: userHandle(mentee, mentee.menteeProfile.name),
         mentorName: mentor.name,
-        mentorHandle: userHandle(mentorUser),
-      })).catch((err) => console.error('Failed to notify admin of mentor request:', err));
+        mentorHandle: userHandle(mentorUser, mentor.name),
+      }), HTML_OPTS).catch((err) => console.error('Failed to notify admin of mentor request:', err));
     }
     return;
   }
@@ -2556,19 +2549,19 @@ bot.on('callback_query', async (callbackQuery) => {
     const menteeProfile = await prisma.menteeProfile.findUnique({ where: { id: menteeProfileId }, include: { user: true } });
     if (action === 'accept') {
       if (chatId) {
-        await bot.sendMessage(chatId, format(mt.messages.requestAccepted, {
+        await bot.sendMessage(chatId, formatHtml(mt.messages.requestAccepted, {
           menteeName: menteeProfile?.name ?? '',
-          menteeHandle: menteeProfile?.user ? userHandle(menteeProfile.user) : '',
-        }));
+          menteeHandle: menteeProfile?.user ? userHandle(menteeProfile.user, menteeProfile.name) : '',
+        }), HTML_OPTS);
       }
       if (menteeProfile?.user) {
         const rt = getTexts(menteeProfile.user.language);
         const mentorContacts = renderContactMethodsSummary(mentorContactMethods(mentorUser.mentorProfile), getContactLabels(rt.locale));
-        await bot.sendMessage(Number(menteeProfile.user.telegramId), format(rt.messages.acceptedNotification, {
+        await bot.sendMessage(Number(menteeProfile.user.telegramId), formatHtml(rt.messages.acceptedNotification, {
           mentorName: mentorUser.mentorProfile.name,
-          mentorHandle: userHandle(mentorUser),
+          mentorHandle: userHandle(mentorUser, mentorUser.mentorProfile.name),
           contacts: mentorContacts ? `\n📞 ${mentorContacts}` : '',
-        }));
+        }), HTML_OPTS);
       }
     } else {
       if (chatId) await bot.sendMessage(chatId, mt.messages.requestDeclined);
