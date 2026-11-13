@@ -89,6 +89,8 @@ enum RequestStatus {
   PENDING
   ACCEPTED
   DECLINED
+  CANCELLED
+  ENDED
 }
 
 model MentorshipRequest {

@@ -392,7 +392,7 @@ function buildMainMenuKeyboard(hasProfile: boolean, isAdmin: boolean, t: Texts) 
   const keyboard: Array<Array<{ text: string }>> = [];
   keyboard.push([{ text: t.startMenu.joinMentors }, { text: t.startMenu.needMentor }]);
   if (hasProfile) {
-    keyboard.push([{ text: t.startMenu.editProfile }]);
+    keyboard.push([{ text: t.startMenu.editProfile }, { text: t.startMenu.myMentorships }]);
   }
   if (isAdmin) {
     keyboard.push([{ text: t.startMenu.adminMentors }, { text: t.startMenu.adminMentees }]);
@@ -1759,6 +1759,47 @@ const handleEditProfile = async (msg: Message) => {
   await showProfileView(msg.chat.id, String(msg.from?.id));
 };
 
+const MAX_ACTIVE_MENTEE_REQUESTS = 2;
+
+// Lists the user's pending requests and active mentorships (as mentee and as
+// mentor) with buttons to cancel a pending request or end an active mentorship.
+const handleMyMentorships = async (msg: Message) => {
+  const chatId = msg.chat.id;
+  const telegramId = String(msg.from?.id);
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true, menteeProfile: true } });
+  if (!user) return;
+  const t = getTexts(user.language);
+
+  const rows: Array<{ id: number; status: string; asMentee: boolean; otherName: string }> = [];
+  if (user.menteeProfile) {
+    const reqs = await prisma.mentorshipRequest.findMany({
+      where: { menteeProfileId: user.menteeProfile.id, status: { in: ['PENDING', 'ACCEPTED'] } },
+      include: { mentorProfile: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    for (const r of reqs) rows.push({ id: r.id, status: r.status, asMentee: true, otherName: r.mentorProfile.name });
+  }
+  if (user.mentorProfile) {
+    const reqs = await prisma.mentorshipRequest.findMany({
+      where: { mentorProfileId: user.mentorProfile.id, status: 'ACCEPTED' },
+      include: { menteeProfile: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    for (const r of reqs) rows.push({ id: r.id, status: r.status, asMentee: false, otherName: r.menteeProfile.name });
+  }
+  if (!rows.length) { await bot.sendMessage(chatId, t.messages.myMentorshipsEmpty); return; }
+
+  const lines = rows.map((r, i) => {
+    const label = format(r.asMentee ? t.messages.asMenteeLabel : t.messages.asMentorLabel, { name: r.otherName });
+    return `${i + 1}. ${label} — ${r.status === 'PENDING' ? t.messages.statusPending : t.messages.statusAccepted}`;
+  });
+  const keyboard = rows.map((r) => [{
+    text: format(r.status === 'PENDING' ? t.messages.cancelRequestButton : t.messages.endMentorshipButton, { name: r.otherName }),
+    callback_data: `${r.status === 'PENDING' ? 'req_cancel' : 'req_end'}:${r.id}`,
+  }]);
+  await bot.sendMessage(chatId, `${t.messages.myMentorshipsHeader}\n\n${lines.join('\n')}`, { reply_markup: { inline_keyboard: keyboard } });
+};
+
 async function renderAdminMentorsList(chatId: number, telegramId: string) {
   const admin = await prisma.user.findUnique({ where: { telegramId } });
   const t = getTexts(admin?.language);
@@ -2526,6 +2567,14 @@ bot.on('callback_query', async (callbackQuery) => {
       return;
     }
 
+    const activeCount = await prisma.mentorshipRequest.count({
+      where: { menteeProfileId: mentee.menteeProfile.id, status: { in: ['PENDING', 'ACCEPTED'] } },
+    });
+    if (activeCount >= MAX_ACTIVE_MENTEE_REQUESTS) {
+      if (chatId) await bot.sendMessage(chatId, format(mt.messages.requestLimitReached, { max: MAX_ACTIVE_MENTEE_REQUESTS }));
+      return;
+    }
+
     await prisma.mentorshipRequest.create({
       data: {
         mentorProfileId: mentor.id,
@@ -2552,6 +2601,38 @@ bot.on('callback_query', async (callbackQuery) => {
         mentorHandle: userHandle(mentorUser, mentor.name),
       }), HTML_OPTS).catch((err) => console.error('Failed to notify admin of mentor request:', err));
     }
+    return;
+  }
+
+  // ── Cancel a pending request (mentee) / end an accepted mentorship (either side) ──
+  if (data.startsWith('req_cancel:') || data.startsWith('req_end:')) {
+    if (!chatId) return;
+    const cancel = data.startsWith('req_cancel:');
+    const requestId = Number(data.split(':')[1]);
+    const request = await prisma.mentorshipRequest.findUnique({
+      where: { id: requestId },
+      include: { mentorProfile: { include: { user: true } }, menteeProfile: { include: { user: true } } },
+    });
+    const mentorUser = request?.mentorProfile.user;
+    const menteeUser = request?.menteeProfile.user;
+    const isMentee = menteeUser?.telegramId === telegramId;
+    const isMentor = mentorUser?.telegramId === telegramId;
+    const expected = cancel ? 'PENDING' : 'ACCEPTED';
+    if (!request || !mentorUser || !menteeUser || request.status !== expected || (cancel ? !isMentee : !(isMentee || isMentor))) {
+      await bot.sendMessage(chatId, t.messages.requestNotActive);
+      return;
+    }
+    await prisma.mentorshipRequest.update({ where: { id: request.id }, data: { status: cancel ? 'CANCELLED' : 'ENDED' } });
+
+    const otherUser = isMentee ? mentorUser : menteeUser;
+    const otherName = isMentee ? request.mentorProfile.name : request.menteeProfile.name;
+    const myName = isMentee ? request.menteeProfile.name : request.mentorProfile.name;
+    const ot = getTexts(otherUser.language);
+    await bot.sendMessage(chatId, format(cancel ? t.messages.requestCancelled : t.messages.mentorshipEnded, { name: otherName }));
+    await bot.sendMessage(
+      Number(otherUser.telegramId),
+      format(cancel ? ot.messages.requestCancelledNotification : ot.messages.mentorshipEndedNotification, { name: myName })
+    ).catch((err) => console.error('Failed to notify other side of cancel/end:', err));
     return;
   }
 
@@ -2719,6 +2800,7 @@ const MENU_ACTIONS: Array<[keyof Texts['startMenu'], (msg: Message) => Promise<v
   ['joinMentors', startMentorOnboarding],
   ['needMentor', startOrSearchMentee],
   ['editProfile', handleEditProfile],
+  ['myMentorships', handleMyMentorships],
   ['settings', handleSettings],
   ['help', handleHelp],
   ['adminMentors', handleAdminMentorsList],
@@ -2882,7 +2964,7 @@ const FEEDBACK_PROMPT_DELAY_MS = 3 * 24 * 60 * 60 * 1000; // ask 3 days after ac
 async function checkFeedbackPrompts() {
   const cutoff = new Date(Date.now() - FEEDBACK_PROMPT_DELAY_MS);
   const dueRequests = await prisma.mentorshipRequest.findMany({
-    where: { status: 'ACCEPTED', feedbackRequestedAt: null, updatedAt: { lte: cutoff } },
+    where: { status: { in: ['ACCEPTED', 'ENDED'] }, feedbackRequestedAt: null, updatedAt: { lte: cutoff } },
     include: { mentorProfile: true, menteeProfile: { include: { user: true } } },
   });
   for (const request of dueRequests) {
