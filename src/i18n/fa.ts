@@ -27,6 +27,15 @@ export const texts = {
     back: '← بازگشت',
     skip: '⏭️ رد کردن',
     done: 'انجام شد',
+    writeOwn: '✍️ خودم می‌نویسم',
+    backToList: '← بازگشت به لیست',
+    customPrompts: {
+      title: '✍️ عنوان شغلی خود را تایپ کنید و بفرستید، مثلاً Backend Engineer.',
+      skills: '✍️ مهارت‌های خود را تایپ کنید و بفرستید (با کاما جدا کنید)، مثلاً React, Docker, SQL.',
+      frameworks: '✍️ زبان‌ها، فریم‌ورک‌ها یا ابزارهای خود را تایپ کنید (با کاما جدا کنید)، مثلاً Django, Redis.',
+      stack: '✍️ حوزه یا استک اصلی خود را تایپ کنید و بفرستید، مثلاً Embedded systems.',
+      country: '✍️ کشور خود را تایپ کنید و بفرستید، مثلاً آلمان.',
+    } as Record<string, string>,
     stepIndicator: '📝 مرحله {current} از {total}',
     typeHints: {
       name: '✍️ نام خود را همین پایین تایپ کنید و بفرستید.',

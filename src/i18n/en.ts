@@ -27,6 +27,15 @@ export const texts = {
     back: '← Back',
     skip: '⏭️ Skip',
     done: 'Done',
+    writeOwn: '✍️ Write it yourself',
+    backToList: '← Back to list',
+    customPrompts: {
+      title: '✍️ Type your professional title and send it, e.g. Backend Engineer.',
+      skills: '✍️ Type your skills and send them (comma separated), e.g. React, Docker, SQL.',
+      frameworks: '✍️ Type your languages, frameworks or tools (comma separated), e.g. Django, Redis.',
+      stack: '✍️ Type your main stack or area and send it, e.g. Embedded systems.',
+      country: '✍️ Type your country and send it, e.g. Germany.',
+    } as Record<string, string>,
     stepIndicator: '📝 Step {current} of {total}',
     typeHints: {
       name: '✍️ Just type your name below and send it.',

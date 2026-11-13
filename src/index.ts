@@ -41,6 +41,8 @@ interface UserState {
   selectedFrameworks?: string[];
   contactMethods?: Partial<Record<ContactType, string>>;
   awaitingContactType?: ContactType;
+  // Set when the user tapped "Write it yourself" on a step — the step they are typing for.
+  awaitingCustom?: string;
   language: Locale;
   // Set when this state exists to edit a single field of an existing profile
   // (via the profile view's per-field edit buttons) rather than run full
@@ -268,6 +270,11 @@ async function getSkillOptions(): Promise<string[]> {
   return combined;
 }
 
+// "Write it yourself" button appended to option lists so typing is discoverable.
+function writeOwnRow(step: string, t: Texts) {
+  return [{ text: t.ui.writeOwn, callback_data: `custom:${step}` }];
+}
+
 function buildSkillsInlineKeyboard(options: string[], selected: string[], canGoBack: boolean, t: Texts) {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
 
@@ -295,6 +302,7 @@ function buildSkillsInlineKeyboard(options: string[], selected: string[], canGoB
     );
   }
 
+  rows.push(writeOwnRow('skills', t));
   const actionRow: Array<{ text: string; callback_data: string }> = [];
   if (canGoBack) actionRow.push({ text: t.ui.back, callback_data: 'back' });
   actionRow.push({
@@ -313,6 +321,7 @@ function buildStackInlineKeyboard(canGoBack: boolean, t: Texts) {
       STACK_OPTIONS.slice(i, i + 2).map((opt) => ({ text: translateOption(t.locale, opt, 'stack'), callback_data: `stack:${opt}` }))
     );
   }
+  rows.push(writeOwnRow('stack', t));
   if (canGoBack) rows.push([{ text: t.ui.back, callback_data: 'back' }]);
   return { inline_keyboard: rows };
 }
@@ -333,6 +342,7 @@ function buildFrameworksInlineKeyboard(stack: string | undefined, selected: stri
       })
     );
   }
+  rows.push(writeOwnRow('frameworks', t));
   const actionRow: Array<{ text: string; callback_data: string }> = [];
   if (canGoBack) actionRow.push({ text: t.ui.back, callback_data: 'back' });
   actionRow.push({
@@ -351,6 +361,7 @@ function buildTitleInlineKeyboard(canGoBack: boolean, t: Texts) {
       options.slice(i, i + 2).map((opt) => ({ text: translateOption(t.locale, opt, 'title'), callback_data: `title:${opt}` }))
     );
   }
+  rows.push(writeOwnRow('title', t));
   if (canGoBack) rows.push([{ text: t.ui.back, callback_data: 'back' }]);
   return { inline_keyboard: rows };
 }
@@ -375,6 +386,7 @@ function buildCountryInlineKeyboard(canGoBack: boolean, t: Texts) {
       options.slice(i, i + 2).map((c) => ({ text: translateOption(t.locale, c, 'country'), callback_data: `country:${c}` }))
     );
   }
+  rows.push(writeOwnRow('country', t));
   const navRow: Array<{ text: string; callback_data: string }> = [];
   if (canGoBack) navRow.push({ text: t.ui.back, callback_data: 'back' });
   navRow.push({ text: t.ui.skip, callback_data: 'skip' });
@@ -437,6 +449,7 @@ async function showStep(chatId: number, step: string, role: 'mentor' | 'mentee',
   const state = userStates.get(telegramId);
   if (!state) return;
 
+  state.awaitingCustom = undefined;
   const t = getTexts(state.language);
   const canGoBack = state.stepIndex > 0;
   const backBtn = { text: t.ui.back, callback_data: 'back' };
@@ -2498,6 +2511,26 @@ bot.on('callback_query', async (callbackQuery) => {
     return;
   }
 
+  // ── "Write it yourself": focused typing prompt for an option step ──
+  if (data.startsWith('custom:')) {
+    if (!state || !chatId) return;
+    const step = data.slice('custom:'.length);
+    state.awaitingCustom = step;
+    const prompt = t.ui.customPrompts[step] ?? t.ui.customPrompts.title;
+    await bot.editMessageText(prompt, {
+      chat_id: chatId,
+      message_id: state.currentMessageId,
+      reply_markup: { inline_keyboard: [[{ text: t.ui.backToList, callback_data: `custom_back:${step}` }]] },
+    }).catch(() => {});
+    return;
+  }
+
+  if (data.startsWith('custom_back:')) {
+    if (!state || !chatId) return;
+    await showStep(chatId, data.slice('custom_back:'.length), state.role, telegramId);
+    return;
+  }
+
   // ── Title selected ──
   if (data.startsWith('title:') && !data.startsWith('title_')) {
     if (!state || !chatId) return;
@@ -2873,7 +2906,20 @@ bot.on('message', async (msg: Message) => {
 
   // Normal text step — when editing a single existing field, that field IS
   // the current step regardless of stepIndex (which stays 0 for edits).
-  const currentStep = (state.editingField ?? ONBOARDING_STEPS[state.role][state.stepIndex]) as OnboardingStep;
+  const currentStep = (state.awaitingCustom ?? state.editingField ?? ONBOARDING_STEPS[state.role][state.stepIndex]) as OnboardingStep;
+  const wasCustom = !!state.awaitingCustom;
+  state.awaitingCustom = undefined;
+
+  // Stack: free text is kept as the stack (it only picks suggestions).
+  if (currentStep === 'stack' as string) {
+    state.profile.stack = text.trim();
+    if (state.editingField === 'frameworks') {
+      await showStep(chatId, 'frameworks', state.role, telegramId);
+      return;
+    }
+    await advanceOrFinish(chatId, telegramId, state);
+    return;
+  }
 
   // Contact step: awaiting a typed value for a chosen contact type
   if (currentStep === 'contact') {
@@ -2909,6 +2955,7 @@ bot.on('message', async (msg: Message) => {
         state.selectedSkills.push(s);
       }
     }
+    if (wasCustom) { await showStep(chatId, 'skills', state.role, telegramId); return; }
     const skillOpts = await getSkillOptions();
     const markup = buildSkillsInlineKeyboard(skillOpts, state.selectedSkills, state.stepIndex > 0, t);
     try {
@@ -2925,6 +2972,7 @@ bot.on('message', async (msg: Message) => {
     for (const f of text.split(',').map((x) => x.trim()).filter(Boolean)) {
       if (!selected.some((e) => e.toLowerCase() === f.toLowerCase())) selected.push(f);
     }
+    if (wasCustom) { await showStep(chatId, 'frameworks', state.role, telegramId); return; }
     try {
       await bot.editMessageReplyMarkup(
         buildFrameworksInlineKeyboard(state.profile.stack, selected, state.stepIndex > 0, t),
