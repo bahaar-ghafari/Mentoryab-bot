@@ -2,7 +2,7 @@ import { escapeHtml, format, formatHtml, userHandle, HTML_OPTS } from './handle.
 import dotenv from 'dotenv';
 import express from 'express';
 import TelegramBot, { type Message } from 'node-telegram-bot-api';
-import { PrismaClient, Prisma } from '@prisma/client';
+import { PrismaClient, Prisma, type MentorProfile, type MenteeProfile } from '@prisma/client';
 import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { findMentorMatches, canonicalizeSkill } from './matching.js';
@@ -849,6 +849,37 @@ async function showProfileView(chatId: number, telegramId: string) {
   }
 
   await renderProfileView(chatId, telegramId, hasMentor ? 'mentor' : 'mentee');
+}
+
+// A profile as shown to the other side of an accepted mentorship: details plus
+// a tappable @username / profile link (and, for mentors, their contact values).
+// HTML — send with HTML_OPTS.
+function buildProfileCardHtml(
+  user: { username?: string | null; telegramId: string },
+  profile: MentorProfile | MenteeProfile,
+  role: 'mentor' | 'mentee',
+  t: Texts
+): string {
+  const mentor = role === 'mentor' ? (profile as MentorProfile) : null;
+  const mentee = role === 'mentee' ? (profile as MenteeProfile) : null;
+  const skills = mentor ? mentor.skills : mentee!.skillsNeeded;
+  const displaySkills = skills.map((s) => translateOption(t.locale, s, 'skill')).join(', ') || t.messages.notAvailable;
+  const displayTitle = mentor?.title ? translateOption(t.locale, mentor.title, 'title') : null;
+  const displayCountry = profile.country ? translateOption(t.locale, profile.country, 'country') : null;
+  const contacts = mentor ? renderContactMethodsSummary(mentorContactMethods(mentor), getContactLabels(t.locale)) : null;
+  const e = escapeHtml;
+
+  return [
+    `👤 ${e(t.summary.name)}: ${e(profile.name)}`,
+    `🆔 ${userHandle(user, profile.name)}`,
+    displayTitle ? `${e(t.summary.title)}: ${e(displayTitle)}` : null,
+    `${e(t.summary.skills)}: ${e(displaySkills)}`,
+    `${e(t.summary.experience)}: ${e(format(t.summary.yearsLabel, { n: profile.experienceYears ?? 0 }))}`,
+    displayCountry ? `${e(t.summary.country)}: ${e(displayCountry)}` : null,
+    contacts ? `${e(t.summary.contact)}: ${e(contacts)}` : null,
+    mentor?.about ? `${e(t.summary.about)}: ${e(mentor.about)}` : null,
+    mentee?.goals ? `${e(t.summary.goals)}: ${e(mentee.goals)}` : null,
+  ].filter(Boolean).join('\n');
 }
 
 async function renderProfileView(chatId: number, telegramId: string, role: 'mentor' | 'mentee') {
@@ -2549,19 +2580,16 @@ bot.on('callback_query', async (callbackQuery) => {
     const menteeProfile = await prisma.menteeProfile.findUnique({ where: { id: menteeProfileId }, include: { user: true } });
     if (action === 'accept') {
       if (chatId) {
-        await bot.sendMessage(chatId, formatHtml(mt.messages.requestAccepted, {
-          menteeName: menteeProfile?.name ?? '',
-          menteeHandle: menteeProfile?.user ? userHandle(menteeProfile.user, menteeProfile.name) : '',
-        }), HTML_OPTS);
+        await bot.sendMessage(chatId, mt.messages.requestAccepted);
+        if (menteeProfile?.user) {
+          await bot.sendMessage(chatId, buildProfileCardHtml(menteeProfile.user, menteeProfile, 'mentee', mt), HTML_OPTS);
+        }
       }
       if (menteeProfile?.user) {
         const rt = getTexts(menteeProfile.user.language);
-        const mentorContacts = renderContactMethodsSummary(mentorContactMethods(mentorUser.mentorProfile), getContactLabels(rt.locale));
-        await bot.sendMessage(Number(menteeProfile.user.telegramId), formatHtml(rt.messages.acceptedNotification, {
-          mentorName: mentorUser.mentorProfile.name,
-          mentorHandle: userHandle(mentorUser, mentorUser.mentorProfile.name),
-          contacts: mentorContacts ? `\n📞 ${mentorContacts}` : '',
-        }), HTML_OPTS);
+        const menteeChatId = Number(menteeProfile.user.telegramId);
+        await bot.sendMessage(menteeChatId, rt.messages.acceptedNotification);
+        await bot.sendMessage(menteeChatId, buildProfileCardHtml(mentorUser, mentorUser.mentorProfile, 'mentor', rt), HTML_OPTS);
       }
     } else {
       if (chatId) await bot.sendMessage(chatId, mt.messages.requestDeclined);
