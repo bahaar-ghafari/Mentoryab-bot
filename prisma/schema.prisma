@@ -103,6 +103,9 @@ model MentorshipRequest {
   // Set once we've asked the mentee to rate this mentorship, so the daily
   // feedback-prompt scheduler doesn't ask again.
   feedbackRequestedAt DateTime?
+  // Why a pending request was cancelled / an accepted mentorship was ended, and by whom.
+  endReason       String?
+  endedBy         String?
   feedback        MentorFeedback?
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt

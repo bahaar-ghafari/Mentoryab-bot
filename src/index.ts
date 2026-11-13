@@ -1412,6 +1412,8 @@ const pendingMentorExplanation = new Set<string>();
 // telegramIds currently being asked for an optional feedback comment, after
 // rating a mentor — keyed by the mentee's telegramId, since only one
 // mentorship request can be mid-feedback at a time per mentee.
+// Users who tapped Cancel request / End mentorship and now owe a typed reason.
+const pendingEndReason = new Map<string, { requestId: number; cancel: boolean }>();
 const pendingFeedbackComment = new Map<string, { requestId: number; score: number }>();
 const MAX_FEEDBACK_COMMENT_LENGTH = 500;
 
@@ -1770,7 +1772,7 @@ const handleMyMentorships = async (msg: Message) => {
   if (!user) return;
   const t = getTexts(user.language);
 
-  const rows: Array<{ id: number; status: string; asMentee: boolean; otherName: string }> = [];
+  const rows: Array<{ id: number; status: string; asMentee: boolean; otherName: string; extra?: string }> = [];
   if (user.menteeProfile) {
     const reqs = await prisma.mentorshipRequest.findMany({
       where: { menteeProfileId: user.menteeProfile.id, status: { in: ['PENDING', 'ACCEPTED'] } },
@@ -1785,19 +1787,23 @@ const handleMyMentorships = async (msg: Message) => {
       include: { menteeProfile: true },
       orderBy: { createdAt: 'asc' },
     });
-    for (const r of reqs) rows.push({ id: r.id, status: r.status, asMentee: false, otherName: r.menteeProfile.name });
+    for (const r of reqs) {
+      const extra = await describeMenteeOtherMentors(r.menteeProfileId, r.mentorProfileId, t);
+      rows.push({ id: r.id, status: r.status, asMentee: false, otherName: r.menteeProfile.name, extra });
+    }
   }
   if (!rows.length) { await bot.sendMessage(chatId, t.messages.myMentorshipsEmpty); return; }
 
   const lines = rows.map((r, i) => {
     const label = format(r.asMentee ? t.messages.asMenteeLabel : t.messages.asMentorLabel, { name: r.otherName });
-    return `${i + 1}. ${label} — ${r.status === 'PENDING' ? t.messages.statusPending : t.messages.statusAccepted}`;
+    const line = `${i + 1}. ${escapeHtml(label)} — ${escapeHtml(r.status === 'PENDING' ? t.messages.statusPending : t.messages.statusAccepted)}`;
+    return r.extra ? `${line}\n    ${r.extra}` : line;
   });
   const keyboard = rows.map((r) => [{
     text: format(r.status === 'PENDING' ? t.messages.cancelRequestButton : t.messages.endMentorshipButton, { name: r.otherName }),
     callback_data: `${r.status === 'PENDING' ? 'req_cancel' : 'req_end'}:${r.id}`,
   }]);
-  await bot.sendMessage(chatId, `${t.messages.myMentorshipsHeader}\n\n${lines.join('\n')}`, { reply_markup: { inline_keyboard: keyboard } });
+  await bot.sendMessage(chatId, `${escapeHtml(t.messages.myMentorshipsHeader)}\n\n${lines.join('\n\n')}`, { ...HTML_OPTS, reply_markup: { inline_keyboard: keyboard } });
 };
 
 async function renderAdminMentorsList(chatId: number, telegramId: string) {
@@ -2584,9 +2590,10 @@ bot.on('callback_query', async (callbackQuery) => {
 
     if (chatId) await bot.sendMessage(chatId, format(mt.messages.requestSent, { mentorName: mentor.name }));
     const rt = getTexts(mentorUser.language);
+    const otherMentorsLine = await describeMenteeOtherMentors(mentee.menteeProfile.id, mentor.id, rt);
     await bot.sendMessage(
       Number(mentorUser.telegramId),
-      formatHtml(rt.messages.requestNew, { menteeName: mentee.menteeProfile.name, menteeHandle: userHandle(mentee, mentee.menteeProfile.name), menteeId: mentee.menteeProfile.id }),
+      formatHtml(rt.messages.requestNew, { menteeName: mentee.menteeProfile.name, menteeHandle: userHandle(mentee, mentee.menteeProfile.name), menteeId: mentee.menteeProfile.id }) + '\n\n' + otherMentorsLine,
       { ...HTML_OPTS, reply_markup: { inline_keyboard: [[{ text: rt.actions.accept, callback_data: `accept:${mentee.menteeProfile.id}` }, { text: rt.actions.decline, callback_data: `decline:${mentee.menteeProfile.id}` }]] } }
     );
 
@@ -2605,6 +2612,7 @@ bot.on('callback_query', async (callbackQuery) => {
   }
 
   // ── Cancel a pending request (mentee) / end an accepted mentorship (either side) ──
+  // Step 1: validate and ask for a reason; the typed reply finishes it (finalizeEndRequest).
   if (data.startsWith('req_cancel:') || data.startsWith('req_end:')) {
     if (!chatId) return;
     const cancel = data.startsWith('req_cancel:');
@@ -2613,26 +2621,18 @@ bot.on('callback_query', async (callbackQuery) => {
       where: { id: requestId },
       include: { mentorProfile: { include: { user: true } }, menteeProfile: { include: { user: true } } },
     });
-    const mentorUser = request?.mentorProfile.user;
-    const menteeUser = request?.menteeProfile.user;
-    const isMentee = menteeUser?.telegramId === telegramId;
-    const isMentor = mentorUser?.telegramId === telegramId;
-    const expected = cancel ? 'PENDING' : 'ACCEPTED';
-    if (!request || !mentorUser || !menteeUser || request.status !== expected || (cancel ? !isMentee : !(isMentee || isMentor))) {
+    const isMentee = request?.menteeProfile.user.telegramId === telegramId;
+    const isMentor = request?.mentorProfile.user.telegramId === telegramId;
+    if (!request || request.status !== (cancel ? 'PENDING' : 'ACCEPTED') || (cancel ? !isMentee : !(isMentee || isMentor))) {
       await bot.sendMessage(chatId, t.messages.requestNotActive);
       return;
     }
-    await prisma.mentorshipRequest.update({ where: { id: request.id }, data: { status: cancel ? 'CANCELLED' : 'ENDED' } });
-
-    const otherUser = isMentee ? mentorUser : menteeUser;
+    userStates.delete(telegramId);
+    pendingMentorExplanation.delete(telegramId);
+    pendingFeedbackComment.delete(telegramId);
+    pendingEndReason.set(telegramId, { requestId, cancel });
     const otherName = isMentee ? request.mentorProfile.name : request.menteeProfile.name;
-    const myName = isMentee ? request.menteeProfile.name : request.mentorProfile.name;
-    const ot = getTexts(otherUser.language);
-    await bot.sendMessage(chatId, format(cancel ? t.messages.requestCancelled : t.messages.mentorshipEnded, { name: otherName }));
-    await bot.sendMessage(
-      Number(otherUser.telegramId),
-      format(cancel ? ot.messages.requestCancelledNotification : ot.messages.mentorshipEndedNotification, { name: myName })
-    ).catch((err) => console.error('Failed to notify other side of cancel/end:', err));
+    await bot.sendMessage(chatId, format(cancel ? t.messages.endReasonPromptCancel : t.messages.endReasonPromptEnd, { name: otherName }));
     return;
   }
 
@@ -2672,8 +2672,20 @@ bot.on('callback_query', async (callbackQuery) => {
         await bot.sendMessage(menteeChatId, formatHtml(rt.messages.acceptedNotification, { mentorHandle: userHandle(mentorUser, mentorUser.mentorProfile.name) }), HTML_OPTS);
         await bot.sendMessage(menteeChatId, buildProfileCardHtml(mentorUser, mentorUser.mentorProfile, 'mentor', rt), HTML_OPTS);
       }
+      if (menteeProfile?.user) {
+        await notifyAdmins((at) => formatHtml(at.messages.requestAcceptedLog, {
+          mentorName: mentorUser.mentorProfile!.name, mentorHandle: userHandle(mentorUser, mentorUser.mentorProfile!.name),
+          menteeName: menteeProfile.name, menteeHandle: userHandle(menteeProfile.user, menteeProfile.name),
+        }));
+      }
     } else {
       if (chatId) await bot.sendMessage(chatId, mt.messages.requestDeclined);
+      if (menteeProfile?.user) {
+        await notifyAdmins((at) => formatHtml(at.messages.requestDeclinedLog, {
+          mentorName: mentorUser.mentorProfile!.name, mentorHandle: userHandle(mentorUser, mentorUser.mentorProfile!.name),
+          menteeName: menteeProfile.name, menteeHandle: userHandle(menteeProfile.user, menteeProfile.name),
+        }));
+      }
       if (menteeProfile?.user) {
         const rt = getTexts(menteeProfile.user.language);
         await bot.sendMessage(Number(menteeProfile.user.telegramId), rt.messages.declinedNotification);
@@ -2827,11 +2839,19 @@ bot.on('message', async (msg: Message) => {
     userStates.delete(telegramId);
     pendingMentorExplanation.delete(telegramId);
     pendingFeedbackComment.delete(telegramId);
+    pendingEndReason.delete(telegramId);
     await menuAction(msg);
     return;
   }
 
   if (pendingMentorExplanation.has(telegramId)) { await handleMentorExplanationText(msg); return; }
+
+  const pendingEnd = pendingEndReason.get(telegramId);
+  if (pendingEnd) {
+    pendingEndReason.delete(telegramId);
+    await finalizeEndRequest(chatId, telegramId, pendingEnd.requestId, pendingEnd.cancel, text.trim().slice(0, 1000));
+    return;
+  }
 
   const pendingFeedback = pendingFeedbackComment.get(telegramId);
   if (pendingFeedback) {
@@ -2956,6 +2976,74 @@ async function checkUnclaimedMentorSearchRequests() {
     await postMentorSearchRequestToGroup(request.id, request.menteeProfile, request.explanation, true);
     await prisma.mentorSearchRequest.update({ where: { id: request.id }, data: { lastPostedAt: new Date() } });
   }
+}
+
+// Sends an informational HTML log line to every admin in their own language.
+async function notifyAdmins(build: (at: Texts) => string) {
+  for (const adminId of adminIds) {
+    const adminUser = await prisma.user.findUnique({ where: { telegramId: adminId } });
+    await bot.sendMessage(Number(adminId), build(getTexts(adminUser?.language)), HTML_OPTS)
+      .catch((err) => console.error('Failed to notify admin:', err));
+  }
+}
+
+// Other mentors this mentee has pending/accepted requests with (excluding one mentor),
+// as an HTML list of "Name (handle)" — so a mentor can see who else is mentoring them.
+async function describeMenteeOtherMentors(menteeProfileId: number, excludeMentorProfileId: number, t: Texts): Promise<string> {
+  const others = await prisma.mentorshipRequest.findMany({
+    where: { menteeProfileId, mentorProfileId: { not: excludeMentorProfileId }, status: { in: ['PENDING', 'ACCEPTED'] } },
+    include: { mentorProfile: { include: { user: true } } },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (!others.length) return escapeHtml(t.messages.menteeNoOtherMentors);
+  const list = others.map((r) => {
+    const status = r.status === 'PENDING' ? t.messages.statusPending : t.messages.statusAccepted;
+    return `${escapeHtml(r.mentorProfile.name)} (${userHandle(r.mentorProfile.user, r.mentorProfile.name)}) — ${escapeHtml(status)}`;
+  }).join(', ');
+  return formatHtml(t.messages.menteeOtherMentors, { list: '\u0000' }).replace('\u0000', list);
+}
+
+// Step 2 of cancel/end: the user typed their reason — apply it and tell everyone.
+async function finalizeEndRequest(chatId: number, telegramId: string, requestId: number, cancel: boolean, reason: string) {
+  const request = await prisma.mentorshipRequest.findUnique({
+    where: { id: requestId },
+    include: { mentorProfile: { include: { user: true } }, menteeProfile: { include: { user: true } } },
+  });
+  const mentorUser = request?.mentorProfile.user;
+  const menteeUser = request?.menteeProfile.user;
+  const isMentee = menteeUser?.telegramId === telegramId;
+  const me = isMentee ? menteeUser : mentorUser;
+  const t = getTexts(me?.language);
+  if (!request || !mentorUser || !menteeUser || request.status !== (cancel ? 'PENDING' : 'ACCEPTED')) {
+    await bot.sendMessage(chatId, t.messages.requestNotActive);
+    return;
+  }
+  await prisma.mentorshipRequest.update({
+    where: { id: request.id },
+    data: { status: cancel ? 'CANCELLED' : 'ENDED', endReason: reason, endedBy: isMentee ? 'MENTEE' : 'MENTOR' },
+  });
+
+  const otherUser = isMentee ? mentorUser : menteeUser;
+  const otherName = isMentee ? request.mentorProfile.name : request.menteeProfile.name;
+  const myName = isMentee ? request.menteeProfile.name : request.mentorProfile.name;
+  const ot = getTexts(otherUser.language);
+  await bot.sendMessage(chatId, format(cancel ? t.messages.requestCancelled : t.messages.mentorshipEnded, { name: otherName }));
+  await bot.sendMessage(
+    Number(otherUser.telegramId),
+    formatHtml(cancel ? ot.messages.requestCancelledNotification : ot.messages.mentorshipEndedNotification, { name: myName, reason }),
+    HTML_OPTS
+  ).catch((err) => console.error('Failed to notify other side of cancel/end:', err));
+
+  await notifyAdmins((at) => cancel
+    ? formatHtml(at.messages.requestCancelledLog, {
+        menteeName: request.menteeProfile.name, menteeHandle: userHandle(menteeUser, request.menteeProfile.name),
+        mentorName: request.mentorProfile.name, mentorHandle: userHandle(mentorUser, request.mentorProfile.name), reason,
+      })
+    : formatHtml(at.messages.mentorshipEndedLog, {
+        byRole: isMentee ? at.summary.roleMentee : at.summary.roleMentor,
+        menteeName: request.menteeProfile.name, menteeHandle: userHandle(menteeUser, request.menteeProfile.name),
+        mentorName: request.mentorProfile.name, mentorHandle: userHandle(mentorUser, request.mentorProfile.name), reason,
+      }));
 }
 
 const FEEDBACK_PROMPT_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
