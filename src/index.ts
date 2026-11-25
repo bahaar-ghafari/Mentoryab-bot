@@ -1962,34 +1962,97 @@ bot.on('callback_query', async (callbackQuery) => {
   }
 
   // ── Mentor claims an unmatched mentee's search request from the group ──
+  // Tapping "I'll help" in the group only DMs the mentor a confirmation; the
+  // mentorship is created on claim_confirm, so a stray tap changes nothing.
   if (data.startsWith('claim_search:')) {
-    if (!chatId) return;
     const requestId = Number(data.slice('claim_search:'.length));
     const request = await prisma.mentorSearchRequest.findUnique({
       where: { id: requestId },
       include: { menteeProfile: { include: { user: true } } },
     });
     if (!request) return;
+    const claimer = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
+    const ct = getTexts(claimer?.language ?? request.menteeProfile.language);
+    const dm = (text: string, opts: TelegramBot.SendMessageOptions = {}) =>
+      bot.sendMessage(Number(telegramId), text, opts).catch(() => {});
 
-    if (request.claimed) {
-      await bot.answerCallbackQuery(callbackQuery.id, { text: 'Already claimed', show_alert: true }).catch(() => {});
-      return;
-    }
+    if (request.claimed) { await dm(ct.messages.alreadyClaimed); return; }
+    if (request.menteeProfile.user.telegramId === telegramId) { await dm(ct.messages.claimOwnRequest); return; }
+    if (!claimer?.mentorProfile?.approved) { await dm(ct.messages.claimNeedMentorProfile); return; }
 
-    await prisma.mentorSearchRequest.update({
+    const groupMessageId = callbackQuery.message?.message_id ?? 0;
+    await dm(formatHtml(ct.messages.claimConfirmPrompt, {
+      menteeName: request.menteeProfile.name,
+      menteeHandle: userHandle(request.menteeProfile.user, request.menteeProfile.name),
+    }), {
+      ...HTML_OPTS,
+      reply_markup: { inline_keyboard: [[
+        { text: ct.messages.claimConfirmButton, callback_data: `claim_confirm:${requestId}:${groupMessageId}` },
+        { text: ct.messages.claimCancelButton, callback_data: `claim_cancel:${requestId}` },
+      ]] },
+    });
+    return;
+  }
+
+  if (data.startsWith('claim_cancel:')) {
+    if (!chatId) return;
+    const claimer = await prisma.user.findUnique({ where: { telegramId } });
+    const ct = getTexts(claimer?.language);
+    const messageId = callbackQuery.message?.message_id;
+    if (messageId) await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId }).catch(() => {});
+    await bot.sendMessage(chatId, ct.messages.claimCancelled);
+    return;
+  }
+
+  if (data.startsWith('claim_confirm:')) {
+    if (!chatId) return;
+    const [, requestIdStr, groupMessageIdStr] = data.split(':');
+    const requestId = Number(requestIdStr);
+    const confirmMessageId = callbackQuery.message?.message_id;
+    if (confirmMessageId) await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: confirmMessageId }).catch(() => {});
+
+    const request = await prisma.mentorSearchRequest.findUnique({
       where: { id: requestId },
+      include: { menteeProfile: { include: { user: true } } },
+    });
+    const mentorUser = await prisma.user.findUnique({ where: { telegramId }, include: { mentorProfile: true } });
+    const ct = getTexts(mentorUser?.language);
+    if (!request) return;
+    if (!mentorUser?.mentorProfile?.approved) { await bot.sendMessage(chatId, ct.messages.claimNeedMentorProfile); return; }
+    if (request.menteeProfile.user.telegramId === telegramId) { await bot.sendMessage(chatId, ct.messages.claimOwnRequest); return; }
+
+    // Atomically claim, so two mentors confirming at once can't both win.
+    const { count } = await prisma.mentorSearchRequest.updateMany({
+      where: { id: requestId, claimed: false },
       data: { claimed: true, claimedByTelegramId: telegramId },
     });
+    if (count === 0) { await bot.sendMessage(chatId, ct.messages.alreadyClaimed); return; }
 
-    const menteeT = getTexts(request.menteeProfile.user.language);
-    await bot.sendMessage(Number(request.menteeProfile.user.telegramId), menteeT.messages.mentorClaimedNotification).catch(() => {});
+    // Record a real ACCEPTED mentorship so it shows in My Mentorships, can be
+    // ended, and gets the feedback prompt. Reuse an existing request between
+    // the two if there is one.
+    const mentorProfileId = mentorUser.mentorProfile.id;
+    const menteeProfileId = request.menteeProfileId;
+    const existing = await prisma.mentorshipRequest.findFirst({
+      where: { mentorProfileId, menteeProfileId, status: { in: ['PENDING', 'ACCEPTED'] } },
+    });
+    if (existing) {
+      if (existing.status === 'PENDING') {
+        await prisma.mentorshipRequest.update({ where: { id: existing.id }, data: { status: 'ACCEPTED' } });
+      }
+    } else {
+      await prisma.mentorshipRequest.create({ data: { mentorProfileId, menteeProfileId, status: 'ACCEPTED' } });
+    }
 
-    const messageId = callbackQuery.message?.message_id;
-    if (messageId) {
+    await announceAcceptedMentorship(mentorUser, request.menteeProfile);
+
+    const groupChatId = process.env.MENTORS_GROUP_CHAT_ID;
+    const groupMessageId = Number(groupMessageIdStr);
+    if (groupChatId && groupMessageId) {
       const groupT = getTexts(request.menteeProfile.language);
       await bot.editMessageReplyMarkup(
         { inline_keyboard: [[{ text: groupT.messages.claimedMarker, callback_data: 'noop' }]] },
-        { chat_id: chatId, message_id: messageId }
+        { chat_id: Number(groupChatId), message_id: groupMessageId }
       ).catch(() => {});
     }
     return;
@@ -2693,30 +2756,7 @@ bot.on('callback_query', async (callbackQuery) => {
 
     const menteeProfile = await prisma.menteeProfile.findUnique({ where: { id: menteeProfileId }, include: { user: true } });
     if (action === 'accept') {
-      // The mentee now has a mentor — close any open group search request so
-      // the weekly "still looking for a mentor" reminder stops.
-      await prisma.mentorSearchRequest.updateMany({
-        where: { menteeProfileId, claimed: false },
-        data: { claimed: true, claimedByTelegramId: telegramId },
-      });
-      if (chatId) {
-        await bot.sendMessage(chatId, mt.messages.requestAccepted);
-        if (menteeProfile?.user) {
-          await bot.sendMessage(chatId, buildProfileCardHtml(menteeProfile.user, menteeProfile, 'mentee', mt), HTML_OPTS);
-        }
-      }
-      if (menteeProfile?.user) {
-        const rt = getTexts(menteeProfile.user.language);
-        const menteeChatId = Number(menteeProfile.user.telegramId);
-        await bot.sendMessage(menteeChatId, formatHtml(rt.messages.acceptedNotification, { mentorHandle: userHandle(mentorUser, mentorUser.mentorProfile.name) }), HTML_OPTS);
-        await bot.sendMessage(menteeChatId, buildProfileCardHtml(mentorUser, mentorUser.mentorProfile, 'mentor', rt), HTML_OPTS);
-      }
-      if (menteeProfile?.user) {
-        await notifyAdmins((at) => formatHtml(at.messages.requestAcceptedLog, {
-          mentorName: mentorUser.mentorProfile!.name, mentorHandle: userHandle(mentorUser, mentorUser.mentorProfile!.name),
-          menteeName: menteeProfile.name, menteeHandle: userHandle(menteeProfile.user, menteeProfile.name),
-        }));
-      }
+      if (menteeProfile?.user) await announceAcceptedMentorship(mentorUser, menteeProfile);
     } else {
       if (chatId) await bot.sendMessage(chatId, mt.messages.requestDeclined);
       if (menteeProfile?.user) {
@@ -3042,6 +3082,35 @@ async function checkUnclaimedMentorSearchRequests() {
     await postMentorSearchRequestToGroup(request.id, request.menteeProfile, request.explanation, true);
     await prisma.mentorSearchRequest.update({ where: { id: request.id }, data: { lastPostedAt: new Date() } });
   }
+}
+
+type UserWithMentorProfile = Prisma.UserGetPayload<{ include: { mentorProfile: true } }>;
+type MenteeProfileWithUser = Prisma.MenteeProfileGetPayload<{ include: { user: true } }>;
+
+// Everything that happens once a mentorship becomes ACCEPTED (mentor accepted
+// a request, or confirmed a claim from the group): close the mentee's open
+// group search requests, exchange profile cards, and log it to admins.
+async function announceAcceptedMentorship(mentorUser: UserWithMentorProfile, menteeProfile: MenteeProfileWithUser) {
+  const mentorProfile = mentorUser.mentorProfile!;
+  await prisma.mentorSearchRequest.updateMany({
+    where: { menteeProfileId: menteeProfile.id, claimed: false },
+    data: { claimed: true, claimedByTelegramId: mentorUser.telegramId },
+  });
+
+  const mt = getTexts(mentorUser.language);
+  const mentorChatId = Number(mentorUser.telegramId);
+  await bot.sendMessage(mentorChatId, mt.messages.requestAccepted).catch(() => {});
+  await bot.sendMessage(mentorChatId, buildProfileCardHtml(menteeProfile.user, menteeProfile, 'mentee', mt), HTML_OPTS).catch(() => {});
+
+  const rt = getTexts(menteeProfile.user.language);
+  const menteeChatId = Number(menteeProfile.user.telegramId);
+  await bot.sendMessage(menteeChatId, formatHtml(rt.messages.acceptedNotification, { mentorHandle: userHandle(mentorUser, mentorProfile.name) }), HTML_OPTS).catch(() => {});
+  await bot.sendMessage(menteeChatId, buildProfileCardHtml(mentorUser, mentorProfile, 'mentor', rt), HTML_OPTS).catch(() => {});
+
+  await notifyAdmins((at) => formatHtml(at.messages.requestAcceptedLog, {
+    mentorName: mentorProfile.name, mentorHandle: userHandle(mentorUser, mentorProfile.name),
+    menteeName: menteeProfile.name, menteeHandle: userHandle(menteeProfile.user, menteeProfile.name),
+  }));
 }
 
 // Sends an informational HTML log line to every admin in their own language.
