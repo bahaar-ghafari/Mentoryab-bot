@@ -2693,6 +2693,12 @@ bot.on('callback_query', async (callbackQuery) => {
 
     const menteeProfile = await prisma.menteeProfile.findUnique({ where: { id: menteeProfileId }, include: { user: true } });
     if (action === 'accept') {
+      // The mentee now has a mentor — close any open group search request so
+      // the weekly "still looking for a mentor" reminder stops.
+      await prisma.mentorSearchRequest.updateMany({
+        where: { menteeProfileId, claimed: false },
+        data: { claimed: true, claimedByTelegramId: telegramId },
+      });
       if (chatId) {
         await bot.sendMessage(chatId, mt.messages.requestAccepted);
         if (menteeProfile?.user) {
@@ -3021,6 +3027,18 @@ async function checkUnclaimedMentorSearchRequests() {
     include: { menteeProfile: { include: { user: true } } },
   });
   for (const request of staleRequests) {
+    // Safety net: a mentee who already has an accepted mentor isn't looking anymore.
+    const accepted = await prisma.mentorshipRequest.findFirst({
+      where: { menteeProfileId: request.menteeProfileId, status: 'ACCEPTED' },
+      include: { mentorProfile: { include: { user: true } } },
+    });
+    if (accepted) {
+      await prisma.mentorSearchRequest.update({
+        where: { id: request.id },
+        data: { claimed: true, claimedByTelegramId: accepted.mentorProfile.user.telegramId },
+      });
+      continue;
+    }
     await postMentorSearchRequestToGroup(request.id, request.menteeProfile, request.explanation, true);
     await prisma.mentorSearchRequest.update({ where: { id: request.id }, data: { lastPostedAt: new Date() } });
   }
