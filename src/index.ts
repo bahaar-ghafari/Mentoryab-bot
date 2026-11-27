@@ -1015,6 +1015,9 @@ async function renderAdminProfileManageView(chatId: number, telegramId: string, 
   if (role === 'mentor' && !mentorApproved) {
     extraRows.push([{ text: t.messages.feedbackApprove, callback_data: `approve_mentor:${profileId}` }]);
   }
+  if (role === 'mentee') {
+    extraRows.push([{ text: t.admin.assignMentorButton, callback_data: `admin_assign:${profileId}` }]);
+  }
   extraRows.push([{ text: t.browse.backToList, callback_data: `admin_back_to_list:${role}` }]);
 
   const keyboard = buildFieldEditKeyboard(
@@ -1688,7 +1691,10 @@ async function handleMentorExplanationText(msg: Message) {
       experience: user.menteeProfile.experienceYears ?? 0,
       location: user.menteeProfile.location || at.messages.notAvailable,
     });
-    await bot.sendMessage(Number(adminId), notification, HTML_OPTS).catch(() => {});
+    await bot.sendMessage(Number(adminId), notification, {
+      ...HTML_OPTS,
+      reply_markup: { inline_keyboard: [[{ text: at.admin.assignMentorButton, callback_data: `admin_assign:${user.menteeProfile.id}` }]] },
+    }).catch(() => {});
   }
 
   await bot.sendMessage(chatId, t.messages.explanationSentConfirmation);
@@ -2033,16 +2039,7 @@ bot.on('callback_query', async (callbackQuery) => {
     // the two if there is one.
     const mentorProfileId = mentorUser.mentorProfile.id;
     const menteeProfileId = request.menteeProfileId;
-    const existing = await prisma.mentorshipRequest.findFirst({
-      where: { mentorProfileId, menteeProfileId, status: { in: ['PENDING', 'ACCEPTED'] } },
-    });
-    if (existing) {
-      if (existing.status === 'PENDING') {
-        await prisma.mentorshipRequest.update({ where: { id: existing.id }, data: { status: 'ACCEPTED' } });
-      }
-    } else {
-      await prisma.mentorshipRequest.create({ data: { mentorProfileId, menteeProfileId, status: 'ACCEPTED' } });
-    }
+    await upsertAcceptedMentorship(mentorProfileId, menteeProfileId);
 
     await announceAcceptedMentorship(mentorUser, request.menteeProfile);
 
@@ -2302,6 +2299,82 @@ bot.on('callback_query', async (callbackQuery) => {
     if (!chatId) return;
     const role = data.slice('delete_profile_no:'.length) as 'mentor' | 'mentee';
     await renderProfileView(chatId, telegramId, role);
+    return;
+  }
+
+  // ── Admin: assign a mentor to any mentee (pick → confirm → accepted mentorship) ──
+  if (data.startsWith('admin_assign:')) {
+    if (!chatId || !adminIds.has(telegramId)) return;
+    const menteeProfileId = Number(data.slice('admin_assign:'.length));
+    const admin = await prisma.user.findUnique({ where: { telegramId } });
+    const at = getTexts(admin?.language);
+    const mentee = await prisma.menteeProfile.findUnique({ where: { id: menteeProfileId } });
+    if (!mentee) { await bot.sendMessage(chatId, at.admin.profileNotFound); return; }
+    const mentors = await prisma.mentorProfile.findMany({
+      where: { approved: true, NOT: { userId: mentee.userId } },
+      orderBy: { name: 'asc' },
+    });
+    if (!mentors.length) { await bot.sendMessage(chatId, at.admin.assignNoMentors); return; }
+    const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (let i = 0; i < mentors.length; i += 2) {
+      rows.push(mentors.slice(i, i + 2).map((m) => ({
+        text: `${m.availability ? '🟢' : '🔴'} ${m.name}`,
+        callback_data: `admin_assign_pick:${menteeProfileId}:${m.id}`,
+      })));
+    }
+    await bot.sendMessage(chatId, format(at.admin.assignMentorPick, { menteeName: mentee.name }), { reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+
+  if (data.startsWith('admin_assign_pick:')) {
+    if (!chatId || !adminIds.has(telegramId)) return;
+    const [, menteeIdStr, mentorIdStr] = data.split(':');
+    const admin = await prisma.user.findUnique({ where: { telegramId } });
+    const at = getTexts(admin?.language);
+    const [mentee, mentor] = await Promise.all([
+      prisma.menteeProfile.findUnique({ where: { id: Number(menteeIdStr) } }),
+      prisma.mentorProfile.findUnique({ where: { id: Number(mentorIdStr) } }),
+    ]);
+    if (!mentee || !mentor) { await bot.sendMessage(chatId, at.admin.profileNotFound); return; }
+    await bot.sendMessage(chatId, format(at.admin.assignConfirm, { mentorName: mentor.name, menteeName: mentee.name }), {
+      reply_markup: { inline_keyboard: [[
+        { text: at.admin.assignConfirmYes, callback_data: `admin_assign_yes:${mentee.id}:${mentor.id}` },
+        { text: at.admin.assignConfirmNo, callback_data: 'admin_assign_no' },
+      ]] },
+    });
+    return;
+  }
+
+  if (data === 'admin_assign_no') {
+    if (!chatId || !adminIds.has(telegramId)) return;
+    const admin = await prisma.user.findUnique({ where: { telegramId } });
+    const messageId = callbackQuery.message?.message_id;
+    if (messageId) await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId }).catch(() => {});
+    await bot.sendMessage(chatId, getTexts(admin?.language).admin.assignCancelled);
+    return;
+  }
+
+  if (data.startsWith('admin_assign_yes:')) {
+    if (!chatId || !adminIds.has(telegramId)) return;
+    const [, menteeIdStr, mentorIdStr] = data.split(':');
+    const messageId = callbackQuery.message?.message_id;
+    if (messageId) await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId }).catch(() => {});
+    const admin = await prisma.user.findUnique({ where: { telegramId } });
+    const at = getTexts(admin?.language);
+    const menteeProfile = await prisma.menteeProfile.findUnique({ where: { id: Number(menteeIdStr) }, include: { user: true } });
+    const mentorProfile = await prisma.mentorProfile.findUnique({ where: { id: Number(mentorIdStr) } });
+    const mentorUser = mentorProfile
+      ? await prisma.user.findUnique({ where: { id: mentorProfile.userId }, include: { mentorProfile: true } })
+      : null;
+    if (!menteeProfile || !mentorUser?.mentorProfile) { await bot.sendMessage(chatId, at.admin.profileNotFound); return; }
+
+    const names = { mentorName: mentorUser.mentorProfile.name, menteeName: menteeProfile.name };
+    const created = await upsertAcceptedMentorship(mentorUser.mentorProfile.id, menteeProfile.id);
+    if (!created) { await bot.sendMessage(chatId, format(at.admin.assignAlreadyActive, names)); return; }
+
+    const adminName = callbackQuery.from.first_name || (admin?.username ? `@${admin.username}` : telegramId);
+    await announceAcceptedMentorship(mentorUser, menteeProfile, { name: adminName });
+    await bot.sendMessage(chatId, format(at.admin.assignDone, names));
     return;
   }
 
@@ -3090,7 +3163,11 @@ type MenteeProfileWithUser = Prisma.MenteeProfileGetPayload<{ include: { user: t
 // Everything that happens once a mentorship becomes ACCEPTED (mentor accepted
 // a request, or confirmed a claim from the group): close the mentee's open
 // group search requests, exchange profile cards, and log it to admins.
-async function announceAcceptedMentorship(mentorUser: UserWithMentorProfile, menteeProfile: MenteeProfileWithUser) {
+async function announceAcceptedMentorship(
+  mentorUser: UserWithMentorProfile,
+  menteeProfile: MenteeProfileWithUser,
+  assignedByAdmin?: { name: string },
+) {
   const mentorProfile = mentorUser.mentorProfile!;
   await prisma.mentorSearchRequest.updateMany({
     where: { menteeProfileId: menteeProfile.id, claimed: false },
@@ -3099,7 +3176,7 @@ async function announceAcceptedMentorship(mentorUser: UserWithMentorProfile, men
 
   const mt = getTexts(mentorUser.language);
   const mentorChatId = Number(mentorUser.telegramId);
-  await bot.sendMessage(mentorChatId, mt.messages.requestAccepted).catch(() => {});
+  await bot.sendMessage(mentorChatId, assignedByAdmin ? mt.messages.adminAssignedNotification : mt.messages.requestAccepted).catch(() => {});
   await bot.sendMessage(mentorChatId, buildProfileCardHtml(menteeProfile.user, menteeProfile, 'mentee', mt), HTML_OPTS).catch(() => {});
 
   const rt = getTexts(menteeProfile.user.language);
@@ -3107,10 +3184,24 @@ async function announceAcceptedMentorship(mentorUser: UserWithMentorProfile, men
   await bot.sendMessage(menteeChatId, formatHtml(rt.messages.acceptedNotification, { mentorHandle: userHandle(mentorUser, mentorProfile.name) }), HTML_OPTS).catch(() => {});
   await bot.sendMessage(menteeChatId, buildProfileCardHtml(mentorUser, mentorProfile, 'mentor', rt), HTML_OPTS).catch(() => {});
 
-  await notifyAdmins((at) => formatHtml(at.messages.requestAcceptedLog, {
+  await notifyAdmins((at) => formatHtml(assignedByAdmin ? at.messages.adminAssignedLog : at.messages.requestAcceptedLog, {
+    adminName: assignedByAdmin?.name ?? '',
     mentorName: mentorProfile.name, mentorHandle: userHandle(mentorUser, mentorProfile.name),
     menteeName: menteeProfile.name, menteeHandle: userHandle(menteeProfile.user, menteeProfile.name),
   }));
+}
+
+// Makes the mentor's relationship with the mentee ACCEPTED: accepts an
+// existing pending request between them, or creates a new accepted one.
+// Returns false if they already had an accepted mentorship.
+async function upsertAcceptedMentorship(mentorProfileId: number, menteeProfileId: number): Promise<boolean> {
+  const existing = await prisma.mentorshipRequest.findFirst({
+    where: { mentorProfileId, menteeProfileId, status: { in: ['PENDING', 'ACCEPTED'] } },
+  });
+  if (existing?.status === 'ACCEPTED') return false;
+  if (existing) await prisma.mentorshipRequest.update({ where: { id: existing.id }, data: { status: 'ACCEPTED' } });
+  else await prisma.mentorshipRequest.create({ data: { mentorProfileId, menteeProfileId, status: 'ACCEPTED' } });
+  return true;
 }
 
 // Sends an informational HTML log line to every admin in their own language.
